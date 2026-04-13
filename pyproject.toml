@@ -39,7 +39,7 @@ dev = [
 ]
 
 [project.scripts]
-polymarket-arb = "main:run"
+polymarket-arb = "main:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

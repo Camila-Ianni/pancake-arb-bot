@@ -28,6 +28,7 @@ class WalletConfig:
     rpc_url: str
     rpc_url_failover: Optional[str]
     wallet_address: str
+    safe_wallet_address: Optional[str]  # Para profit sweep
 
 
 @dataclass(frozen=True)
@@ -192,6 +193,7 @@ def load_config() -> AppConfig:
         rpc_url=rpc_url,
         rpc_url_failover=os.getenv("RPC_URL_FAILOVER"),
         wallet_address=os.getenv("WALLET_ADDRESS", ""),
+        safe_wallet_address=os.getenv("SAFE_WALLET_ADDRESS"),
     )
 
     # =========================================================================
