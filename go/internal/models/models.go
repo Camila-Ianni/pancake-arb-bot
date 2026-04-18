@@ -30,15 +30,17 @@ type CacheLinePad [CacheLineSize]byte
 type SniperAsset uint8
 
 const (
-	AssetBTC SniperAsset = iota
+	AssetBTC  SniperAsset = iota
 	AssetETH
 	AssetSOL
 	AssetBNB
-	AssetCount
+	AssetDOGE
+	AssetMATIC
+	AssetCount // 6
 )
 
 // assetStrings avoids allocations on String() — indexed by SniperAsset value.
-var assetStrings = [AssetCount]string{"BTC", "ETH", "SOL", "BNB"}
+var assetStrings = [AssetCount]string{"BTC", "ETH", "SOL", "BNB", "DOGE", "MATIC"}
 
 func (a SniperAsset) String() string {
 	if a < AssetCount {
@@ -49,7 +51,8 @@ func (a SniperAsset) String() string {
 
 func AssetFromSymbol(sym string) (SniperAsset, bool) {
 	// Manual dispatch — no map lookup, no hash, no allocation.
-	if len(sym) == 7 {
+	switch len(sym) {
+	case 7: // BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT
 		switch sym[0] {
 		case 'B':
 			if sym == "BTCUSDT" {
@@ -67,25 +70,32 @@ func AssetFromSymbol(sym string) (SniperAsset, bool) {
 				return AssetSOL, true
 			}
 		}
+	case 8: // DOGEUSDT
+		if sym == "DOGEUSDT" {
+			return AssetDOGE, true
+		}
+	case 9: // MATICUSDT
+		if sym == "MATICUSDT" {
+			return AssetMATIC, true
+		}
 	}
 	return 0, false
 }
 
 func AssetFromTag(tag string) (SniperAsset, bool) {
-	if len(tag) == 3 {
-		switch tag[0] {
-		case 'B':
-			if tag == "BTC" {
-				return AssetBTC, true
-			}
-			if tag == "BNB" {
-				return AssetBNB, true
-			}
-		case 'E':
-			return AssetETH, true
-		case 'S':
-			return AssetSOL, true
-		}
+	switch tag {
+	case "BTC":
+		return AssetBTC, true
+	case "ETH":
+		return AssetETH, true
+	case "SOL":
+		return AssetSOL, true
+	case "BNB":
+		return AssetBNB, true
+	case "DOGE":
+		return AssetDOGE, true
+	case "MATIC":
+		return AssetMATIC, true
 	}
 	return 0, false
 }

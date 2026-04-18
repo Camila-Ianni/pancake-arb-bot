@@ -22,7 +22,9 @@ import (
 	"github.com/polymarket-arb-bot/internal/models"
 )
 
-const binanceWSURL = "wss://stream.binance.com:9443/stream?streams=btcusdt@markPrice/ethusdt@markPrice/solusdt@markPrice/bnbusdt@markPrice"
+const binanceWSURL = "wss://stream.binance.com:9443/stream?streams=" +
+	"btcusdt@markPrice/ethusdt@markPrice/solusdt@markPrice/" +
+	"bnbusdt@markPrice/dogeusdt@markPrice/maticusdt@markPrice"
 
 // binanceMsg is the minimal struct for JSON parsing.
 type binanceMsg struct {
