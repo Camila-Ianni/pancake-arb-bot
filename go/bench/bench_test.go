@@ -16,7 +16,9 @@ import (
 
 	"github.com/shopspring/decimal"
 
+	"github.com/polymarket-arb-bot/internal/fastlog"
 	"github.com/polymarket-arb-bot/internal/models"
+	"github.com/polymarket-arb-bot/internal/simd"
 )
 
 // BenchmarkPriceUpdate measures the cost of a single atomic price write+read.
@@ -173,6 +175,78 @@ func BenchmarkNowNs(b *testing.B) {
 	}
 }
 
+// BenchmarkSIMDSpread measures the NEON-accelerated spread calculation.
+// Target: <5ns for 4 assets simultaneously
+func BenchmarkSIMDSpread(b *testing.B) {
+	prices := [4]uint64{
+		uint64(models.FPFromFloat(67543.0)),
+		uint64(models.FPFromFloat(3456.0)),
+		uint64(models.FPFromFloat(145.0)),
+		uint64(models.FPFromFloat(567.0)),
+	}
+	strikes := [4]uint64{
+		uint64(models.FPFromFloat(67000.0)),
+		uint64(models.FPFromFloat(3400.0)),
+		uint64(models.FPFromFloat(140.0)),
+		uint64(models.FPFromFloat(600.0)), // above price → should be 0
+	}
+	yesPrices := [4]uint64{
+		uint64(models.FPFromFloat(0.65)),
+		uint64(models.FPFromFloat(0.72)),
+		uint64(models.FPFromFloat(0.58)),
+		uint64(models.FPFromFloat(0.80)),
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		_, _, _ = simd.ComputeSpreadsAndRank(prices, strikes, yesPrices)
+	}
+}
+
+// BenchmarkRingLogger measures lock-free ring buffer log write latency.
+// Target: <30ns per write (no blocking, no allocation)
+func BenchmarkRingLogger(b *testing.B) {
+	rlog := fastlog.NewRingLogger()
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		rlog.Log(fastlog.LevelInfo, "tick processed")
+	}
+}
+
+// BenchmarkFixedPointMul measures fixed-point multiplication.
+// Target: <10ns
+func BenchmarkFixedPointMul(b *testing.B) {
+	a := models.FPFromFloat(67543.12)
+	c := models.FPFromFloat(0.65)
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		_ = a.Mul(c)
+	}
+}
+
+// BenchmarkHubCorrelation measures cross-asset correlation computation.
+// Target: <500ns for N=60
+func BenchmarkHubCorrelation(b *testing.B) {
+	hub := models.NewSharedMemoryHub()
+	// Fill with 100 price ticks per asset.
+	for i := 0; i < 100; i++ {
+		hub.RecordPrice(models.AssetBTC, models.FPFromFloat(67000.0+float64(i)*10))
+		hub.RecordPrice(models.AssetETH, models.FPFromFloat(3400.0+float64(i)*5))
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		_ = hub.Correlation(models.AssetBTC, models.AssetETH, 60)
+	}
+}
+
 // fastParseFloatBench is a copy for benchmarking (feed package is internal).
 func fastParseFloatBench(s string) float64 {
 	var result float64
@@ -198,3 +272,4 @@ func fastParseFloatBench(s string) float64 {
 	}
 	return result
 }
+

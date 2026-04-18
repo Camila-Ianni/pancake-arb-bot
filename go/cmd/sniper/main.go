@@ -38,6 +38,7 @@ import (
 	"github.com/polymarket-arb-bot/internal/config"
 	"github.com/polymarket-arb-bot/internal/engine"
 	"github.com/polymarket-arb-bot/internal/executor"
+	"github.com/polymarket-arb-bot/internal/fastlog"
 	"github.com/polymarket-arb-bot/internal/feed"
 	"github.com/polymarket-arb-bot/internal/models"
 	"github.com/polymarket-arb-bot/internal/panel"
@@ -135,13 +136,18 @@ func main() {
 
 	// ── Start goroutines ────────────────────────────────────────────────
 
+	// 0. Ring buffer logger (non-blocking, drains in background)
+	rlog := fastlog.NewRingLogger()
+	go rlog.DrainLoop(done, nil)
+	rlog.Info("sniper starting — ring buffer logger active")
+
 	// 1. Binance feed (6 assets, with hub recording)
 	go feed.RunBinanceFeed(state, hub, logger.Named("binance"), done)
 
 	// 2. Polymarket feed
 	go feed.RunPolymarketFeed(state, cfg, logger.Named("polymarket"), done)
 
-	// 3. Executor pool
+	// 3. Executor pool (with pre-signed tx cache)
 	exec, err := executor.New(execCh, resCh, cfg, state, logger.Named("executor"))
 	if err != nil {
 		logger.Fatal("executor init failed", zap.Error(err))
@@ -152,7 +158,16 @@ func main() {
 	eng := engine.New(state, cfg, hub, tracker, execCh, resCh, logger.Named("engine"))
 	go eng.Run(done)
 
-	// 5. Panel TUI Pro (with hub + tracker)
+	// 5. The General — SIMD-accelerated signal ranking + liquidity rotation
+	general := engine.NewGeneral(state, hub, tracker)
+	_ = general // used by engine internally via hub
+
+	// 6. Per-asset Watcher goroutines (each pinned to a P-core)
+	for i := models.SniperAsset(0); i < models.AssetCount; i++ {
+		go general.RunWatcher(i, done)
+	}
+
+	// 7. Panel TUI Pro (with hub + tracker)
 	go panel.RunLoop(state, hub, tracker, done)
 
 	// ── Main loop: wait for kill switch or OS signal ─────────────────────
