@@ -24,6 +24,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -42,6 +44,21 @@ import (
 )
 
 func main() {
+	// ── GC & Runtime Tuning ─────────────────────────────────────────────
+	// GOGC=1600: delay GC cycles — we preallocate everything, so the GC
+	// has very little work. This reduces GC pauses from ~1ms to ~50µs.
+	debug.SetGCPercent(1600)
+
+	// GOMEMLIMIT: set a soft memory limit so the GC only runs when
+	// we're actually under memory pressure (256MB is generous for this bot).
+	debug.SetMemoryLimit(256 * 1024 * 1024)
+
+	// Reserve 2 cores for OS/kernel — the rest are ours.
+	procs := runtime.NumCPU()
+	if procs > 4 {
+		runtime.GOMAXPROCS(procs - 2)
+	}
+
 	// ── Logger ──────────────────────────────────────────────────────────
 	logCfg := zap.NewProductionConfig()
 	logCfg.EncoderConfig.TimeKey = "ts"

@@ -52,6 +52,9 @@ func RunPolymarketFeed(
 		}
 		conn.SetReadLimit(2_000_000)
 
+		// Disable Nagle's algorithm for minimum latency.
+		setTCPNoDelay(conn)
+
 		// Subscribe to markets.
 		subscribe(conn, cfg, logger)
 

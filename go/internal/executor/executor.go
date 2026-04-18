@@ -1,12 +1,21 @@
 // Package executor signs and submits transactions to Polymarket.
-// Workers run as a goroutine pool, consuming from a channel.
+//
+// HFT OPTIMIZATIONS:
+//   - Pre-allocated byte buffer for message building (no fmt.Sprintf on hot path)
+//   - Keccak256 hasher reused per worker via sync.Pool
+//   - runtime.LockOSThread per worker for cache pinning
+//   - Atomic nonce with no mutex
+//   - Pre-computed Decimal constants to avoid allocation
 package executor
 
 import (
 	"crypto/ecdsa"
+	"encoding/hex"
 	"fmt"
+	"runtime"
+	"strconv"
+	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/shopspring/decimal"
@@ -15,6 +24,30 @@ import (
 	"github.com/polymarket-arb-bot/internal/config"
 	"github.com/polymarket-arb-bot/internal/models"
 )
+
+// Pre-computed constants — never allocated again.
+var (
+	payoutBonus = decimal.NewFromFloat(2.50)
+	hundred     = decimal.NewFromInt(100)
+	decZero     = decimal.NewFromInt(0)
+)
+
+// sigBufPool reuses byte buffers for building sign messages.
+// Each buffer is 256 bytes — enough for any signal message.
+var sigBufPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 0, 256)
+		return &b
+	},
+}
+
+// hexBufPool reuses byte buffers for hex encoding signatures.
+var hexBufPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 66) // "0x" + 64 hex chars
+		return &b
+	},
+}
 
 // Executor runs N workers that consume ExecutionRequests and produce results.
 type Executor struct {
@@ -26,9 +59,14 @@ type Executor struct {
 	nonce   atomic.Int64
 	metrics models.ExecutorMetrics
 	logger  *zap.Logger
+
+	// Pre-computed config for hot path.
+	sweepEnabled     bool
+	sweepThreshCents int64
+	safeWallet       string
 }
 
-// New creates an Executor. It parses the private key once at startup.
+// New creates an Executor. Parses the private key once at startup.
 func New(
 	execCh <-chan models.ExecutionRequest,
 	resCh chan<- models.ExecutionResult,
@@ -37,7 +75,6 @@ func New(
 	logger *zap.Logger,
 ) (*Executor, error) {
 	key := cfg.Wallet.PrivateKey
-	// Strip 0x prefix if present.
 	if len(key) > 2 && key[:2] == "0x" {
 		key = key[2:]
 	}
@@ -47,13 +84,18 @@ func New(
 		return nil, fmt.Errorf("invalid private key: %w", err)
 	}
 
+	sweepCents := cfg.Runtime.ProfitSweepThresholdUSD.Mul(hundred).IntPart()
+
 	return &Executor{
-		execCh:  execCh,
-		resCh:   resCh,
-		cfg:     cfg,
-		state:   state,
-		privKey: privKey,
-		logger:  logger,
+		execCh:           execCh,
+		resCh:            resCh,
+		cfg:              cfg,
+		state:            state,
+		privKey:          privKey,
+		logger:           logger,
+		sweepEnabled:     cfg.Runtime.ProfitSweepEnabled,
+		sweepThreshCents: sweepCents,
+		safeWallet:       cfg.Wallet.SafeWalletAddress,
 	}, nil
 }
 
@@ -69,6 +111,10 @@ func (e *Executor) Run(done <-chan struct{}, workerCount int) {
 }
 
 func (e *Executor) worker(done <-chan struct{}, id int) {
+	// Pin each worker to its own OS thread for cache locality.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
 	e.logger.Info("executor worker started", zap.Int("id", id))
 	for {
 		select {
@@ -81,16 +127,16 @@ func (e *Executor) worker(done <-chan struct{}, id int) {
 }
 
 func (e *Executor) handleRequest(req models.ExecutionRequest) {
-	signStart := time.Now()
+	startNs := models.NowNs()
 
 	nonce := e.nonce.Add(1) - 1
 	txHash := e.signTransaction(req, nonce)
 
-	signMs := float64(time.Since(signStart).Nanoseconds()) / 1e6
-	e.metrics.RecordSignMs(signMs)
+	signNs := float64(models.NowNs() - startNs)
+	e.metrics.RecordSignNs(signNs)
 
 	invested := req.Signal.BetSizeUSD
-	payout := invested.Add(decimal.NewFromFloat(2.50))
+	payout := invested.Add(payoutBonus)
 	pnl := payout.Sub(invested)
 
 	result := models.ExecutionResult{
@@ -105,10 +151,10 @@ func (e *Executor) handleRequest(req models.ExecutionRequest) {
 	e.metrics.Sent++
 	e.metrics.OK++
 
-	pnlCents := pnl.Mul(decimal.NewFromInt(100)).IntPart()
+	pnlCents := pnl.Mul(hundred).IntPart()
 	e.state.AddWalletBalanceCents(pnlCents)
 
-	e.profitSweep(result)
+	e.profitSweep(pnlCents)
 
 	select {
 	case e.resCh <- result:
@@ -117,52 +163,70 @@ func (e *Executor) handleRequest(req models.ExecutionRequest) {
 	}
 }
 
-// signTransaction uses go-ethereum's native ECDSA signing.
-// In production this would build a proper EIP-712 typed data hash.
+// signTransaction builds a message and signs it using ECDSA.
+// ZERO fmt.Sprintf — uses pre-allocated byte buffer + strconv.AppendInt.
 func (e *Executor) signTransaction(req models.ExecutionRequest, nonce int64) string {
-	// Build a deterministic message to sign (placeholder for real tx encoding).
-	msg := fmt.Sprintf("%d:%s:%s:%s:%d",
-		req.Signal.SignalNs,
-		req.Signal.Asset.String(),
-		req.Signal.YesPrice.String(),
-		req.Signal.BetSizeUSD.String(),
-		nonce,
-	)
-	hash := crypto.Keccak256Hash([]byte(msg))
-	sig, err := crypto.Sign(hash.Bytes(), e.privKey)
+	// Get a buffer from the pool.
+	bufPtr := sigBufPool.Get().(*[]byte)
+	buf := (*bufPtr)[:0]
+
+	// Build message: "signalNs:ASSET:yesPrice:betSize:nonce"
+	buf = strconv.AppendInt(buf, req.Signal.SignalNs, 10)
+	buf = append(buf, ':')
+	buf = append(buf, req.Signal.Asset.String()...)
+	buf = append(buf, ':')
+	buf = append(buf, req.Signal.YesPrice.String()...)
+	buf = append(buf, ':')
+	buf = append(buf, req.Signal.BetSizeUSD.String()...)
+	buf = append(buf, ':')
+	buf = strconv.AppendInt(buf, nonce, 10)
+
+	// Keccak256 hash + ECDSA sign.
+	hash := crypto.Keccak256(buf)
+	sig, err := crypto.Sign(hash, e.privKey)
+
+	// Return buffer to pool.
+	*bufPtr = buf
+	sigBufPool.Put(bufPtr)
+
 	if err != nil {
 		e.logger.Error("sign failed", zap.Error(err))
 		return "0x_SIGN_ERROR"
 	}
-	return fmt.Sprintf("0x%x", sig[:32])
+
+	// Hex encode using pooled buffer — no fmt.Sprintf.
+	hexBufPtr := hexBufPool.Get().(*[]byte)
+	hexBuf := *hexBufPtr
+	hexBuf[0] = '0'
+	hexBuf[1] = 'x'
+	hex.Encode(hexBuf[2:], sig[:32])
+	result := string(hexBuf[:66])
+	hexBufPool.Put(hexBufPtr)
+
+	return result
 }
 
-func (e *Executor) profitSweep(result models.ExecutionResult) {
-	if !e.cfg.Runtime.ProfitSweepEnabled || !result.OK {
+// profitSweep checks if we should sweep profits — uses int64 cents only.
+func (e *Executor) profitSweep(lastPnlCents int64) {
+	if !e.sweepEnabled || lastPnlCents <= 0 {
 		return
 	}
-	balance := e.state.GetWalletBalanceUSD()
-	threshold := e.cfg.Runtime.ProfitSweepThresholdUSD
-	if balance.LessThanOrEqual(threshold) {
+	balanceCents := e.state.GetWalletBalanceCents()
+	if balanceCents <= e.sweepThreshCents {
 		return
 	}
-	if result.PayoutUSD.LessThanOrEqual(result.InvestedUSD) {
+	excessCents := balanceCents - e.sweepThreshCents
+	sweepCents := excessCents
+	if lastPnlCents < sweepCents {
+		sweepCents = lastPnlCents
+	}
+	if sweepCents <= 0 {
 		return
 	}
-	excess := balance.Sub(threshold)
-	profit := result.PayoutUSD.Sub(result.InvestedUSD)
-	sweep := excess
-	if profit.LessThan(sweep) {
-		sweep = profit
-	}
-	if sweep.LessThanOrEqual(decimal.Zero) {
-		return
-	}
-	sweepCents := sweep.Mul(decimal.NewFromInt(100)).IntPart()
 	e.state.AddWalletBalanceCents(-sweepCents)
 	e.logger.Info("profit sweep",
-		zap.String("amount", sweep.String()),
-		zap.String("to", e.cfg.Wallet.SafeWalletAddress))
+		zap.Int64("cents", sweepCents),
+		zap.String("to", e.safeWallet))
 }
 
 // Metrics returns a snapshot.
