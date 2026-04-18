@@ -77,6 +77,22 @@ func main() {
 		logger.Fatal("config load failed", zap.Error(err))
 	}
 
+	// ── SharedMemoryHub (cross-asset correlation) ────────────────────────
+	hub := models.NewSharedMemoryHub()
+
+	// ── Monte Carlo analyze mode ─────────────────────────────────────────
+	if len(os.Args) > 1 && os.Args[1] == "--analyze" {
+		logger.Info("🎲 Running Monte Carlo simulation...")
+		engine.RunSimulation(hub, engine.SimConfig{
+			Simulations:   10_000,
+			TradesPerDay:  200,
+			BaseStakeUSD:  10.0,
+			CompoundPct:   0.05,
+			DrawdownLimit: 0.20,
+		})
+		return
+	}
+
 	// ── Preflight connectivity ──────────────────────────────────────────
 	if err := preflightChecks(cfg, logger); err != nil {
 		logger.Fatal("preflight failed", zap.Error(err))
@@ -86,9 +102,14 @@ func main() {
 	capital := askInitialCapital()
 	state := models.NewSharedState(capital)
 	state.SetSniperState(models.StateArmed)
+
+	// ── DailyTracker (compounding + drawdown) ────────────────────────────
+	tracker := models.NewDailyTracker(10.0, 100.0) // $10 base stake, $100/day target
+
 	logger.Info("session started",
 		zap.String("capital", capital.String()),
-		zap.Bool("dry_run", cfg.Execution.DryRun))
+		zap.Bool("dry_run", cfg.Execution.DryRun),
+		zap.String("daily_target", "$100"))
 
 	// ── Channels ────────────────────────────────────────────────────────
 	execCh := make(chan models.ExecutionRequest, cfg.Performance.QueueMaxSize)
@@ -114,8 +135,8 @@ func main() {
 
 	// ── Start goroutines ────────────────────────────────────────────────
 
-	// 1. Binance feed
-	go feed.RunBinanceFeed(state, logger.Named("binance"), done)
+	// 1. Binance feed (6 assets, with hub recording)
+	go feed.RunBinanceFeed(state, hub, logger.Named("binance"), done)
 
 	// 2. Polymarket feed
 	go feed.RunPolymarketFeed(state, cfg, logger.Named("polymarket"), done)
@@ -127,12 +148,12 @@ func main() {
 	}
 	go exec.Run(done, cfg.Runtime.MaxParallelSignals)
 
-	// 4. Arbitrage engine
-	eng := engine.New(state, cfg, execCh, resCh, logger.Named("engine"))
+	// 4. Arbitrage engine (with hub + tracker)
+	eng := engine.New(state, cfg, hub, tracker, execCh, resCh, logger.Named("engine"))
 	go eng.Run(done)
 
-	// 5. Panel TUI
-	go panel.RunLoop(state, done)
+	// 5. Panel TUI Pro (with hub + tracker)
+	go panel.RunLoop(state, hub, tracker, done)
 
 	// ── Main loop: wait for kill switch or OS signal ─────────────────────
 	ticker := time.NewTicker(100 * time.Millisecond)
@@ -151,7 +172,7 @@ func main() {
 
 shutdown:
 	state.SetSniperState(models.StateStopped)
-	panel.Render(state)
+	panel.Render(state, hub, tracker)
 	logger.Info("sniper shut down cleanly",
 		zap.String("pnl", state.GetCumulativePnlUSD().String()))
 }

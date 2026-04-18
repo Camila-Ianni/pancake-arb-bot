@@ -46,7 +46,8 @@ func setTCPNoDelay(conn *websocket.Conn) {
 
 // RunBinanceFeed connects to Binance and publishes ticks.
 // Pinned to an OS thread for cache locality.
-func RunBinanceFeed(state *models.SharedState, logger *zap.Logger, done <-chan struct{}) {
+// If hub is non-nil, also records prices in the ring buffer for correlation.
+func RunBinanceFeed(state *models.SharedState, hub *models.SharedMemoryHub, logger *zap.Logger, done <-chan struct{}) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -143,6 +144,11 @@ func RunBinanceFeed(state *models.SharedState, logger *zap.Logger, done <-chan s
 				// Atomic store — no lock, no allocation.
 				state.SetPrice(asset, price)
 				state.SetLastBinanceNs(recvNs)
+
+				// Record in hub ring buffer for correlation analysis.
+				if hub != nil {
+					hub.RecordPrice(asset, models.FPFromFloat(price))
+				}
 
 				// Reset msg for next iteration (avoid stale data).
 				msg.Data.S = ""

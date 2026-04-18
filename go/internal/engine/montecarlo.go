@@ -1,11 +1,11 @@
-// Package montecarlo implements a Monte Carlo simulator for profit projection.
+// Package engine provides a Monte Carlo simulator for profit projection.
 //
 // Run with: ./sniper --analyze
 //
 // Simulates 10,000 trade sequences using recent price data from the
 // SharedMemoryHub ring buffers. Projects daily profit distribution and
 // estimates P50/P90/P99 outcomes.
-package montecarlo
+package engine
 
 import (
 	"fmt"

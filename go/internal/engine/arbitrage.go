@@ -31,6 +31,8 @@ var (
 type ArbitrageEngine struct {
 	state       *models.SharedState
 	cfg         *config.AppConfig
+	hub         *models.SharedMemoryHub
+	tracker     *models.DailyTracker
 	execCh      chan<- models.ExecutionRequest
 	resCh       <-chan models.ExecutionResult
 	metrics     models.EngineMetrics
@@ -39,7 +41,7 @@ type ArbitrageEngine struct {
 
 	// Pre-computed config values to avoid pointer chasing on hot path.
 	closeWindowSec int64
-	yesPriceMaxF64 float64 // YesPriceMax as float64 for fast comparison
+	yesPriceMaxF64 float64
 	stakeUsageF64  float64
 	killPnlCents   int64
 	minStakeCents  int64
@@ -49,6 +51,8 @@ type ArbitrageEngine struct {
 func New(
 	state *models.SharedState,
 	cfg *config.AppConfig,
+	hub *models.SharedMemoryHub,
+	tracker *models.DailyTracker,
 	execCh chan<- models.ExecutionRequest,
 	resCh <-chan models.ExecutionResult,
 	logger *zap.Logger,
@@ -60,6 +64,8 @@ func New(
 	return &ArbitrageEngine{
 		state:          state,
 		cfg:            cfg,
+		hub:            hub,
+		tracker:        tracker,
 		execCh:         execCh,
 		resCh:          resCh,
 		logger:         logger,
@@ -108,6 +114,12 @@ func (e *ArbitrageEngine) Run(done <-chan struct{}) {
 		if e.state.IsKilled() {
 			e.state.SetSniperState(models.StateStopped)
 			return
+		}
+
+		// Safety mode: pause trading during drawdown cooldown.
+		if e.tracker != nil && e.tracker.IsInSafetyMode() {
+			e.state.SetStatus("SAFETY_MODE_COOLDOWN")
+			continue
 		}
 
 		// --- HOT PATH START ---

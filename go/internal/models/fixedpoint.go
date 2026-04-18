@@ -63,14 +63,14 @@ func (fp FixedPoint) Float64() float64 {
 //
 //go:nosplit
 func (fp FixedPoint) Cents() int64 {
-	return int64(fp / (FPScale / 100))
+	return int64(uint64(fp) / (FPScale / 100))
 }
 
 // Dollars returns the integer dollar amount (truncated).
 //
 //go:nosplit
 func (fp FixedPoint) Dollars() int64 {
-	return int64(fp / FPScale)
+	return int64(uint64(fp) / FPScale)
 }
 
 // Add returns fp + other. Zero allocation.
