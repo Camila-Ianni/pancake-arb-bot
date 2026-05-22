@@ -79,6 +79,7 @@ func BenchmarkDecisionLoop(b *testing.B) {
 			MarketID:      "mkt_" + i.String(),
 			ConditionID:   "cond_" + i.String(),
 			YesPrice:      decimal.NewFromFloat(0.65),
+			YesPriceF64:   0.65,
 			StrikePrice:   67000.0,
 			MarketCloseTs: now + 10, // 10 seconds to close
 			UpdatedNs:     models.NowNs(),
@@ -116,6 +117,7 @@ func BenchmarkTimeToTrade(b *testing.B) {
 		MarketID:      "mkt_btc",
 		ConditionID:   "cond_btc",
 		YesPrice:      decimal.NewFromFloat(0.65),
+		YesPriceF64:   0.65,
 		StrikePrice:   67000.0,
 		MarketCloseTs: now + 10,
 		UpdatedNs:     models.NowNs(),
@@ -123,6 +125,7 @@ func BenchmarkTimeToTrade(b *testing.B) {
 
 	// Buffered channel so sends don't block.
 	execCh := make(chan models.ExecutionRequest, 8192)
+	betSize := decimal.NewFromInt(95)
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -135,9 +138,7 @@ func BenchmarkTimeToTrade(b *testing.B) {
 		markPrice := state.GetPrice(models.AssetBTC)
 
 		if book != nil && markPrice > book.StrikePrice {
-			balanceCents := state.GetWalletBalanceCents()
-			stakeCents := int64(float64(balanceCents) * 0.95)
-			betSize := decimal.NewFromInt(stakeCents).Div(decimal.NewFromInt(100))
+			_ = state.GetWalletBalanceCents()
 
 			signal := models.SniperSignal{
 				Asset:       models.AssetBTC,
@@ -272,4 +273,3 @@ func fastParseFloatBench(s string) float64 {
 	}
 	return result
 }
-

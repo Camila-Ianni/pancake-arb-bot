@@ -197,9 +197,8 @@ func (e *ArbitrageEngine) evaluateAsset(asset models.SniperAsset) bool {
 		return false
 	}
 
-	// YesPrice comparison: convert to float64 once (book already has it as Decimal).
-	yesPriceF64, _ := book.YesPrice.Float64()
-	if yesPriceF64 >= e.yesPriceMaxF64 {
+	// YesPriceF64 is precomputed when the book is parsed, outside this path.
+	if book.YesPriceF64 >= e.yesPriceMaxF64 {
 		return false
 	}
 
@@ -215,7 +214,7 @@ func (e *ArbitrageEngine) evaluateAsset(asset models.SniperAsset) bool {
 		return false
 	}
 
-	// Only create the Decimal for the signal (leaving the hot path).
+	// Only create Decimal for the signal after all decisions have passed.
 	betSize := decimal.NewFromInt(stakeCents).Div(hundred)
 
 	signal := models.SniperSignal{

@@ -87,6 +87,7 @@ func RunPolymarketFeed(
 					MarketID:      book.marketID,
 					ConditionID:   book.conditionID,
 					YesPrice:      book.yesPrice,
+					YesPriceF64:   book.yesPriceF64,
 					StrikePrice:   book.strikePrice,
 					MarketCloseTs: book.closeTs,
 					UpdatedNs:     models.NowNs(),
@@ -101,6 +102,7 @@ type parsedBook struct {
 	marketID    string
 	conditionID string
 	yesPrice    decimal.Decimal
+	yesPriceF64 float64
 	strikePrice float64
 	closeTs     int64
 }
@@ -182,6 +184,7 @@ func parsePolyMsg(msg *polyMsg, cfg *config.AppConfig, _ *zap.Logger) *parsedBoo
 	if err != nil {
 		return nil
 	}
+	yesPriceF64, _ := yesPrice.Float64()
 
 	strikeStr := msg.StrikePrice
 	if strikeStr == "" {
@@ -203,6 +206,7 @@ func parsePolyMsg(msg *polyMsg, cfg *config.AppConfig, _ *zap.Logger) *parsedBoo
 		marketID:    marketID,
 		conditionID: conditionID,
 		yesPrice:    yesPrice,
+		yesPriceF64: yesPriceF64,
 		strikePrice: strike,
 		closeTs:     closeTs,
 	}

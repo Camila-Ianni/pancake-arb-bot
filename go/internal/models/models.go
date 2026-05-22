@@ -30,7 +30,7 @@ type CacheLinePad [CacheLineSize]byte
 type SniperAsset uint8
 
 const (
-	AssetBTC  SniperAsset = iota
+	AssetBTC SniperAsset = iota
 	AssetETH
 	AssetSOL
 	AssetBNB
@@ -145,6 +145,7 @@ type MarketBook struct {
 	MarketID      string
 	ConditionID   string
 	YesPrice      decimal.Decimal
+	YesPriceF64   float64
 	StrikePrice   float64
 	MarketCloseTs int64
 	UpdatedNs     int64
@@ -191,11 +192,11 @@ type SharedState struct {
 	_pad0  [CacheLineSize - int(AssetCount)*8]byte
 
 	// --- Cache line 1: sniper lifecycle (written by engine goroutine) ---
-	sniperState   atomic.Int32
-	killSwitch    atomic.Bool
-	lastSignalNs  atomic.Int64
-	inflightBits  atomic.Uint32
-	_pad1         CacheLinePad
+	sniperState  atomic.Int32
+	killSwitch   atomic.Bool
+	lastSignalNs atomic.Int64
+	inflightBits atomic.Uint32
+	_pad1        CacheLinePad
 
 	// --- Cache line 2: feed timestamps (written by feed goroutines) ---
 	lastBinanceNs atomic.Int64
@@ -240,14 +241,14 @@ func (s *SharedState) GetPrice(a SniperAsset) float64 {
 // -- State accessors --
 
 func (s *SharedState) SetSniperState(st SniperState) { s.sniperState.Store(int32(st)) }
-func (s *SharedState) GetSniperState() SniperState    { return SniperState(s.sniperState.Load()) }
-func (s *SharedState) SetKillSwitch(v bool)           { s.killSwitch.Store(v) }
-func (s *SharedState) IsKilled() bool                 { return s.killSwitch.Load() }
-func (s *SharedState) SetStatus(st string)            { s.latestStatus.Store(st) }
-func (s *SharedState) GetStatus() string              { return s.latestStatus.Load().(string) }
-func (s *SharedState) SetLastBinanceNs(ns int64)      { s.lastBinanceNs.Store(ns) }
-func (s *SharedState) GetLastBinanceNs() int64        { return s.lastBinanceNs.Load() }
-func (s *SharedState) SetLastSignalNs(ns int64)       { s.lastSignalNs.Store(ns) }
+func (s *SharedState) GetSniperState() SniperState   { return SniperState(s.sniperState.Load()) }
+func (s *SharedState) SetKillSwitch(v bool)          { s.killSwitch.Store(v) }
+func (s *SharedState) IsKilled() bool                { return s.killSwitch.Load() }
+func (s *SharedState) SetStatus(st string)           { s.latestStatus.Store(st) }
+func (s *SharedState) GetStatus() string             { return s.latestStatus.Load().(string) }
+func (s *SharedState) SetLastBinanceNs(ns int64)     { s.lastBinanceNs.Store(ns) }
+func (s *SharedState) GetLastBinanceNs() int64       { return s.lastBinanceNs.Load() }
+func (s *SharedState) SetLastSignalNs(ns int64)      { s.lastSignalNs.Store(ns) }
 
 // -- Balance accessors (hot-path uses cents directly, cold-path converts) --
 
@@ -292,8 +293,8 @@ func (s *SharedState) BookCount() int {
 
 // -- Inflight tracking (lock-free bitfield, popcount via math/bits) --
 
-func (s *SharedState) SetInflight(a SniperAsset)    { s.inflightBits.Or(1 << uint(a)) }
-func (s *SharedState) ClearInflight(a SniperAsset)  { s.inflightBits.And(^(1 << uint(a))) }
+func (s *SharedState) SetInflight(a SniperAsset)     { s.inflightBits.Or(1 << uint(a)) }
+func (s *SharedState) ClearInflight(a SniperAsset)   { s.inflightBits.And(^(1 << uint(a))) }
 func (s *SharedState) IsInflight(a SniperAsset) bool { return s.inflightBits.Load()&(1<<uint(a)) != 0 }
 
 func (s *SharedState) InflightCount() int {

@@ -28,7 +28,7 @@ type General struct {
 	// Atomic EV ranking — written by SIMD, read by watchers.
 	currentBestAsset atomic.Int32
 	currentBestEV    atomic.Uint64
-	committedAsset   atomic.Int32  // -1 = no commitment
+	committedAsset   atomic.Int32 // -1 = no commitment
 	committedEV      atomic.Uint64
 
 	// Per-asset latency tracking (nanoseconds).
@@ -68,8 +68,7 @@ func (g *General) RankSignals() (bestAsset int, bestEV uint64, spreads [4]uint64
 		book := g.state.GetBook(asset)
 		if book != nil {
 			strikes[i] = uint64(models.FPFromFloat(book.StrikePrice))
-			yp, _ := book.YesPrice.Float64()
-			yesPrices[i] = uint64(models.FPFromFloat(yp))
+			yesPrices[i] = uint64(models.FPFromFloat(book.YesPriceF64))
 		}
 	}
 
