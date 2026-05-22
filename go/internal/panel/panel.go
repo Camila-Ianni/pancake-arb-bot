@@ -60,6 +60,14 @@ func Render(state *models.SharedState, hub *models.SharedMemoryHub, tracker *mod
 		state.GetInitialCapitalUSD().StringFixed(2),
 		state.GetWalletBalanceUSD().StringFixed(2),
 		state.IsKilled())
+	balanceCents := state.GetWalletBalanceCents()
+	phaseLabel := "FASE 1: SEMILLA"
+	if state.IsCompoundPhaseActive() || balanceCents >= 10000 {
+		phaseLabel = "FASE 2: COMPOUNDING"
+	}
+	velocity := growthVelocity(balanceCents)
+	fmt.Printf("║ Operational Phase: %-20s | Target Velocity: %-8s ║\n",
+		phaseLabel, velocity)
 
 	// — Daily progress —
 	if tracker != nil {
@@ -138,6 +146,14 @@ func Render(state *models.SharedState, hub *models.SharedMemoryHub, tracker *mod
 		state.BookCount(), state.InflightCount(),
 		time.Now().Format("15:04:05"))
 	fmt.Println("\033[1m╚══════════════════════════════════════════════════════════════════════╝\033[0m")
+}
+
+func growthVelocity(balanceCents int64) string {
+	if balanceCents < 0 {
+		balanceCents = 0
+	}
+	factorHundredths := balanceCents * 100 / 500
+	return fmt.Sprintf("x%d.%02d", factorHundredths/100, factorHundredths%100)
 }
 
 // progressBar generates a visual progress bar.

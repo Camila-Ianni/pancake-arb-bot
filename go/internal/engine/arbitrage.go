@@ -42,7 +42,6 @@ type ArbitrageEngine struct {
 	// Pre-computed config values to avoid pointer chasing on hot path.
 	closeWindowSec int64
 	yesPriceMaxF64 float64
-	stakeUsageF64  float64
 	killPnlCents   int64
 	minStakeCents  int64
 }
@@ -58,7 +57,6 @@ func New(
 	logger *zap.Logger,
 ) *ArbitrageEngine {
 	yesPriceMax, _ := cfg.Runtime.YesPriceMax.Float64()
-	stakeUsage, _ := cfg.Runtime.StakeUsage.Float64()
 	killPnlCents := cfg.Runtime.KillSwitchPnlUSD.Mul(hundred).IntPart()
 
 	return &ArbitrageEngine{
@@ -71,7 +69,6 @@ func New(
 		logger:         logger,
 		closeWindowSec: int64(cfg.Runtime.CloseWindowSec),
 		yesPriceMaxF64: yesPriceMax,
-		stakeUsageF64:  stakeUsage,
 		killPnlCents:   killPnlCents,
 		minStakeCents:  100, // $1.00 in cents
 	}
@@ -208,7 +205,20 @@ func (e *ArbitrageEngine) evaluateAsset(asset models.SniperAsset) bool {
 		e.state.SetStatus("INSUFFICIENT_USDC")
 		return false
 	}
-	stakeCents := int64(float64(balanceCents) * e.stakeUsageF64)
+	var stakeCents int64
+	if balanceCents < 10000 {
+		if balanceCents < 2000 {
+			stakeCents = 150
+		} else {
+			stakeCents = balanceCents >> 3
+		}
+	} else {
+		e.state.SetCompoundPhaseActive()
+		stakeCents = (balanceCents * 8) / 10
+	}
+	if stakeCents > balanceCents {
+		stakeCents = balanceCents
+	}
 	if stakeCents < e.minStakeCents {
 		e.state.SetStatus("INSUFFICIENT_USDC")
 		return false

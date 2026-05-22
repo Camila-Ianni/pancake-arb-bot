@@ -125,7 +125,7 @@ func BenchmarkTimeToTrade(b *testing.B) {
 
 	// Buffered channel so sends don't block.
 	execCh := make(chan models.ExecutionRequest, 8192)
-	betSize := decimal.NewFromInt(95)
+	betSize := decimal.NewFromInt(8000)
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -138,7 +138,21 @@ func BenchmarkTimeToTrade(b *testing.B) {
 		markPrice := state.GetPrice(models.AssetBTC)
 
 		if book != nil && markPrice > book.StrikePrice {
-			_ = state.GetWalletBalanceCents()
+			balanceCents := state.GetWalletBalanceCents()
+			var stakeCents int64
+			if balanceCents < 10000 {
+				if balanceCents < 2000 {
+					stakeCents = 150
+				} else {
+					stakeCents = balanceCents >> 3
+				}
+			} else {
+				stakeCents = (balanceCents * 8) / 10
+			}
+			if stakeCents > balanceCents {
+				stakeCents = balanceCents
+			}
+			_ = stakeCents
 
 			signal := models.SniperSignal{
 				Asset:       models.AssetBTC,

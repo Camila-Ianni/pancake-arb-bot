@@ -126,6 +126,10 @@ const (
 	SideNo
 )
 
+const (
+	PhaseCompoundActive uint32 = 1 << iota
+)
+
 // ---------------------------------------------------------------------------
 // Hot-path structs — value types, no pointers, stack-allocated
 // Sized to fit in L1 cache (≤64 bytes each)
@@ -206,6 +210,7 @@ type SharedState struct {
 	initialCapitalCents atomic.Int64
 	walletBalanceCents  atomic.Int64
 	cumulativePnlCents  atomic.Int64
+	phaseBits           atomic.Uint32
 	_pad3               CacheLinePad
 
 	// --- Cache line 4: status + books (low-frequency updates) ---
@@ -264,6 +269,11 @@ func (s *SharedState) GetCumulativePnlUSD() decimal.Decimal {
 func (s *SharedState) AddCumulativePnlCents(d int64) { s.cumulativePnlCents.Add(d) }
 func (s *SharedState) GetInitialCapitalUSD() decimal.Decimal {
 	return decimal.NewFromInt(s.initialCapitalCents.Load()).Div(decimal.NewFromInt(100))
+}
+
+func (s *SharedState) SetCompoundPhaseActive() { s.phaseBits.Or(PhaseCompoundActive) }
+func (s *SharedState) IsCompoundPhaseActive() bool {
+	return s.phaseBits.Load()&PhaseCompoundActive != 0
 }
 
 // -- Market book accessors --
