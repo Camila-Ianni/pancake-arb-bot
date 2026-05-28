@@ -253,7 +253,8 @@ class PolymarketMonitor:
                 strike_price=strike,
                 market_close_ts=close_ts,
             )
-        except Exception:
+        except Exception as e:
+            self.shared_state.log_messages.append(f"❌ [MONITOR] Error WS _parse_ws_message: {e} | asset: {asset}")
             return None
 
     # ── REST Polling (fallback) ────────────────────────────────────────────
@@ -312,7 +313,8 @@ class PolymarketMonitor:
                 if self._ws_connected and self._ws:
                     try:
                         await self._subscribe(self._ws)
-                    except Exception:
+                    except Exception as e:
+                        self.shared_state.log_messages.append(f"❌ [MONITOR] Exception HTTP en Gamma Events: {e}")
                         pass
 
         if not self._market_map:
@@ -328,9 +330,11 @@ class PolymarketMonitor:
                                 continue
                             market_data = await resp.json()
                             self._process_rest_market(asset, data, market_data)
-                    except Exception:
+                    except Exception as e:
+                        self.shared_state.log_messages.append(f"❌ [MONITOR] Exception REST /markets: {e}")
                         continue
-        except Exception:
+        except Exception as e:
+            self.shared_state.log_messages.append(f"❌ [MONITOR] Exception general REST poll: {e}")
             pass
 
     def _process_rest_market(

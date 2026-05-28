@@ -67,8 +67,16 @@ class ArbitrageEngine:
 
     async def _evaluate_asset(self, asset: SniperAsset, book: dict) -> bool:
         now_s = int(time.time())
-        close_ts = int(book["market_close_ts"])
-        remaining = close_ts - now_s
+        try:
+            close_ts = int(book.get("market_close_ts", 0))
+            remaining = close_ts - now_s
+        except Exception as e:
+            self.shared_state.log_messages.append(f"❌ [{asset.name}] Error calculando remaining: {e} | Book: {book}")
+            return False
+
+        if remaining % 10 == 0 or remaining <= 20:
+            self.shared_state.log_messages.append(f"🔍 [CHECK {asset.name}] Tick recibido. Remaining: {remaining}s")
+
         if remaining <= 0:
             self._fired_window[asset] = False
             return False
@@ -80,13 +88,24 @@ class ArbitrageEngine:
         if asset in self.shared_state.inflight_assets:
             return False
 
-        yes_price = Decimal(str(book["yes_price"]))
-        strike = float(book["strike_price"])
-        mark_price = float(self.shared_state.asset_prices.get(asset, 0.0))
+        try:
+            yes_price = Decimal(str(book.get("yes_price", "0")))
+            strike_val = book.get("strike_price", 0.0)
+            strike = float(strike_val) if strike_val is not None else 0.0
+            mark_price = float(self.shared_state.asset_prices.get(asset, 0.0))
+        except Exception as e:
+            self.shared_state.log_messages.append(f"❌ [{asset.name}] Exception parseando precios: {e}")
+            return False
+
+        # 2. AUDITAR RETORNOS TEMPRANOS POR PRECIOS VACÍOS
+        if not mark_price or mark_price <= 0 or not yes_price or not strike:
+            if remaining % 10 == 0 or remaining <= 20:
+                self.shared_state.log_messages.append(f"❌ [{asset.name}] Abortado por precio 0 o nulo: Binance={mark_price} | Poly={yes_price} | Strike={strike}")
+            return False
 
         if remaining >= self.runtime_cfg.close_window_sec:
             if remaining % 10 == 0:
-                self.shared_state.log_messages.append(f"⏳ [{asset.name}] Monitoreando vela de 5m... Quedan {remaining}s para el cierre. Spot: {mark_price:.2f}")
+                self.shared_state.log_messages.append(f"⏳ [{asset.name}] Monitoreando vela de 5m... Quedan {remaining}s. Spot: {mark_price:.2f}")
             return False
 
         self.shared_state.log_messages.append(f"🎯 [ALERTA SNIPER] ¡{asset.name} en ventana crítica de ejecución! Faltan {remaining}s. Spot: {mark_price} | Strike: {strike} | YES: {yes_price}")
