@@ -120,10 +120,52 @@ async def simulated_market_activity(result_queue: asyncio.Queue[ExecutionResult]
             await result_queue.put(result)
 
 
+async def _check_polygon_rpc(session: aiohttp.ClientSession, rpc_url: str) -> bool:
+    payload = {"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []}
+    try:
+        async with session.post(rpc_url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status != 200:
+                return False
+            data = await resp.json()
+            return str(data.get("result", "")).lower() in ("0x89", "137")
+    except Exception:
+        return False
+
+
+async def _check_polymarket_api_key(session: aiohttp.ClientSession, api_key: str) -> bool:
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        async with session.get(
+            "https://clob.polymarket.com/markets?limit=1",
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            return resp.status in (200, 401, 403)
+    except Exception:
+        return False
+
+
+async def preflight_connectivity_checks() -> None:
+    rpc_url = os.getenv("RPC_URL", "").strip()
+    polymarket_api_key = os.getenv("POLYMARKET_API_KEY", "").strip()
+    if not rpc_url:
+        raise RuntimeError("Falta RPC_URL para preflight.")
+    if not polymarket_api_key:
+        raise RuntimeError("Falta POLYMARKET_API_KEY para preflight.")
+    async with aiohttp.ClientSession() as session:
+        rpc_ok = await _check_polygon_rpc(session, rpc_url)
+        key_ok = await _check_polymarket_api_key(session, polymarket_api_key)
+    if not rpc_ok:
+        raise RuntimeError("RPC de Polygon no responde correctamente.")
+    if not key_ok:
+        raise RuntimeError("API Key de Polymarket inválida o no accesible.")
+
+
 async def run() -> None:
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).parent / ".env")
     clear_console()
+    await preflight_connectivity_checks()
     
     initial_capital = ask_initial_capital()
     shared = SharedMarketState(initial_capital_usd=initial_capital, sniper_state=SniperState.ARMED)
