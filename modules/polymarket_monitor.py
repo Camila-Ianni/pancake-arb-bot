@@ -97,6 +97,7 @@ class PolymarketMonitor:
                             data = await resp.json()
                             markets_list = data.get("markets", [])
                             if not markets_list:
+                                self.shared_state.log_messages.append(f"⚠️ [API VACÍA] {slug} sin mercados")
                                 continue
                             m = markets_list[0]
                             m_id = m.get("id") or m.get("market_id")
@@ -133,8 +134,10 @@ class PolymarketMonitor:
                                 }
                                 if self._ws and self._ws_connected:
                                     asyncio.create_task(self._subscribe(self._ws))
-                except Exception:
-                    pass
+                        else:
+                            self.shared_state.log_messages.append(f"❌ [API ERR] {slug} Status: {resp.status}")
+                except Exception as e:
+                    self.shared_state.log_messages.append(f"❌ [NET EXCEPTION] -> {str(e)}")
 
     # ── WebSocket ──────────────────────────────────────────────────────────
 
@@ -293,6 +296,8 @@ class PolymarketMonitor:
         current_interval = (now // 300) * 300
         intervals_to_check = [current_interval, current_interval + 300]
         
+        self.shared_state.log_messages.append(f"🔄 [POLLING] Escaneando Gamma API... Int: {current_interval}")
+        
         if not hasattr(self, "_last_interval") or self._last_interval != current_interval:
             print(f"\n🔄 [MONITOR] Resolviendo IDs dinámicamente para intervalos HFT...")
             new_map = {}
@@ -307,6 +312,7 @@ class PolymarketMonitor:
                                     d = await resp.json()
                                     markets_list = d.get("markets", [])
                                     if not markets_list:
+                                        self.shared_state.log_messages.append(f"⚠️ [API VACÍA] {slug} sin mercados")
                                         continue
                                     m = markets_list[0]
                                     m_id = str(m.get("id") or m.get("market_id"))
@@ -344,8 +350,10 @@ class PolymarketMonitor:
                                         }
                                         label = "Current" if interval == current_interval else "Next/Pre-cache"
                                         print(f"  ✅ Enlazado {asset_name.upper()} 5m dinámico ({label}). ID: {m_id} | Strike: {strike_val}")
-                        except Exception:
-                            pass
+                                else:
+                                    self.shared_state.log_messages.append(f"❌ [API ERR] {slug} Status: {resp.status}")
+                        except Exception as e:
+                            self.shared_state.log_messages.append(f"❌ [NET EXCEPTION] -> {str(e)}")
             if new_map:
                 self._market_map.update(new_map)
                 self._last_interval = current_interval
@@ -359,7 +367,13 @@ class PolymarketMonitor:
             return
 
         now_sec = int(time.time())
-        expired = [a for a, d in self._market_map.items() if now_sec > d.get("market_close_ts", 0) + 2]
+        expired = []
+        for a, d in self._market_map.items():
+            close_ts = d.get("market_close_ts", 0)
+            if now_sec > close_ts + 2:
+                expired.append(a)
+                self.shared_state.log_messages.append(f"🧹 [CLEANUP] Desalojando {a.name} | CloseTS: {close_ts} | Now: {now_sec} | Diff: {now_sec - close_ts}s")
+                
         for a in expired:
             self._market_map.pop(a, None)
             self.shared_state.polymarket_books.pop(a, None)
@@ -385,7 +399,10 @@ class PolymarketMonitor:
 
     def _process_rest_market(self, asset: SniperAsset, map_data: Dict[str, str], market_data: dict) -> None:
         """Procesa datos de un mercado desde la REST API utilizando el caché purificado."""
-        if int(time.time()) > map_data.get("market_close_ts", 0) + 2:
+        now_sec = int(time.time())
+        close_ts = map_data.get("market_close_ts", 0)
+        if now_sec > close_ts + 2:
+            self.shared_state.log_messages.append(f"🧹 [REST CLEANUP] Desalojando {asset.name} | CloseTS: {close_ts} | Now: {now_sec} | Diff: {now_sec - close_ts}s")
             self._market_map.pop(asset, None)
             self.shared_state.polymarket_books.pop(asset, None)
             return
