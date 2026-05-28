@@ -47,24 +47,12 @@ class Web3Executor:
             self.shared_state.log_messages.append("⚠️ [ERROR CRÍTICO] PRIVATE_KEY no configurada. Ejecución en vivo fallará.")
         if not self.api_secret or not self.api_passphrase:
             self.shared_state.log_messages.append("⚠️ [ERROR CRÍTICO] Faltan POLYMARKET_SECRET o POLYMARKET_PASSPHRASE en el .env.")
-            
-        self._account = Account.from_key(self.private_key) if self.private_key else None
-        self._session: Optional[aiohttp.ClientSession] = None
         self._workers = []
         self._nonce = 0
         self._nonce_lock = asyncio.Lock()
 
     async def start(self) -> None:
         self._running = True
-        
-        # Headers para Polymarket CLOB API
-        headers = {}
-        if self.api_key:
-            headers["POLYMARKET-API-KEY"] = self.api_key
-            headers["Content-Type"] = "application/json"
-            
-        self._session = aiohttp.ClientSession(headers=headers)
-        
         worker_count = max(1, self.runtime_cfg.max_parallel_signals)
         self._workers = [
             asyncio.create_task(self._worker(), name="Web3Worker-{0}".format(i))
@@ -179,8 +167,6 @@ class Web3Executor:
 
     async def stop(self) -> None:
         self._running = False
-        if self._session:
-            await self._session.close()
         for task in self._workers:
             task.cancel()
         await asyncio.gather(*self._workers, return_exceptions=True)
