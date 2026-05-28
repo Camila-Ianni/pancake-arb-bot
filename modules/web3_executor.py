@@ -46,25 +46,49 @@ class Web3Executor:
         await asyncio.gather(*self._workers)
 
     async def _worker(self) -> None:
+        is_dry_run = os.getenv("DRY_RUN", "false").lower() in ("true", "1", "yes")
         while self._running:
             req = await self.execution_queue.get()
-            sign_start = time.perf_counter_ns()
-            nonce = await self._acquire_nonce()
-            tx_hash = self._fast_sign_stub(req=req, nonce=nonce)
-            sign_ms = (time.perf_counter_ns() - sign_start) / 1_000_000
-            self.metrics.record_sign_ms(sign_ms)
+            
+            if is_dry_run:
+                # Sandbox: Paper Trading Mode
+                await asyncio.sleep(0.05)  # Simular latencia de red
+                tx_hash = "0xDRYRUN" + sha1(str(time.time_ns()).encode()).hexdigest()
+                self.metrics.record_sign_ms(0.0)
+                
+                # Simular gas (ej: $0.05 en MATIC) y fill automático
+                invested = req.signal.bet_size_usd
+                simulated_gas_usd = Decimal("0.05")
+                payout = invested + Decimal("2.50")  # Retorno estático simulado
+                pnl = payout - invested - simulated_gas_usd
+                
+                result = ExecutionResult(
+                    tx_hash=tx_hash,
+                    ok=True,
+                    asset=req.signal.asset,
+                    invested_usd=invested,
+                    payout_usd=payout,
+                    pnl_delta_usd=pnl,
+                )
+            else:
+                sign_start = time.perf_counter_ns()
+                nonce = await self._acquire_nonce()
+                tx_hash = self._fast_sign_stub(req=req, nonce=nonce)
+                sign_ms = (time.perf_counter_ns() - sign_start) / 1_000_000
+                self.metrics.record_sign_ms(sign_ms)
 
-            invested = req.signal.bet_size_usd
-            payout = invested + Decimal("2.50")
-            pnl = payout - invested
-            result = ExecutionResult(
-                tx_hash=tx_hash,
-                ok=True,
-                asset=req.signal.asset,
-                invested_usd=invested,
-                payout_usd=payout,
-                pnl_delta_usd=pnl,
-            )
+                invested = req.signal.bet_size_usd
+                payout = invested + Decimal("2.50")
+                pnl = payout - invested
+                result = ExecutionResult(
+                    tx_hash=tx_hash,
+                    ok=True,
+                    asset=req.signal.asset,
+                    invested_usd=invested,
+                    payout_usd=payout,
+                    pnl_delta_usd=pnl,
+                )
+
             self.metrics.sent += 1
             self.metrics.ok += 1
             self.shared_state.wallet_usdc_balance += pnl

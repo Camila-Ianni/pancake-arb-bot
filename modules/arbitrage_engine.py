@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import os
 from decimal import Decimal
 from typing import Dict, Optional, Union
 
@@ -79,14 +80,32 @@ class ArbitrageEngine:
         strike = float(book["strike_price"])
         mark_price = float(self.shared_state.asset_prices.get(asset, 0.0))
 
+        # --- LOG DETALLADO DE ARBITRAJE SIMULADO ---
+        is_dry_run = os.getenv("DRY_RUN", "false").lower() in ("true", "1", "yes")
+        gross_spread = ((mark_price - strike) / strike * 100) if strike > 0 else 0
+        
+        decision = "Ejecutaría compra"
         if mark_price <= strike:
-            return False
-        if yes_price >= self.runtime_cfg.yes_price_max:
-            return False
-
+            decision = "Descartado por falta de margen (Spot <= Strike)"
+        elif yes_price >= self.runtime_cfg.yes_price_max:
+            decision = "Descartado por precio YES muy alto"
+            
         bet_size = self._compute_dynamic_stake()
-        if bet_size <= Decimal("0"):
-            self.shared_state.latest_status = "INSUFFICIENT_USDC"
+        if decision == "Ejecutaría compra" and bet_size <= Decimal("0"):
+            decision = "Descartado por liquidez USDC insuficiente"
+
+        if is_dry_run:
+            simulated_gas = Decimal("0.05")
+            pnl_proj = Decimal("2.50") - simulated_gas if decision == "Ejecutaría compra" else Decimal("0")
+            print(f"\n[SIMULACIÓN OP] Símbolo evaluado: {asset.name}")
+            print(f"  ├ Binance Mark: {mark_price:.2f} | Polymarket YES: {yes_price:.2f}")
+            print(f"  ├ Spread Bruto detectado: {gross_spread:.4f}%")
+            print(f"  ├ PnL Proyectado Neto: ${pnl_proj:.2f} (Gas deducido)")
+            print(f"  └ Decisión: {decision}")
+
+        if decision != "Ejecutaría compra":
+            if "USDC" in decision:
+                self.shared_state.latest_status = "INSUFFICIENT_USDC"
             return False
 
         signal = SniperSignal(
