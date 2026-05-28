@@ -11,6 +11,9 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import aiohttp
 
+# Agregamos el directorio actual al PYTHONPATH para evitar errores visuales (unresolved imports) en el IDE (Pylance/VSCode)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from models import ExecutionRequest, ExecutionResult, RuntimeConfig, SharedMarketState, SniperAsset, SniperState
 from modules.arbitrage_engine import ArbitrageEngine
 from modules.crypto_feed import CryptoFeed
