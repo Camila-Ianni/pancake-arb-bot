@@ -33,6 +33,9 @@ El bot escanea continuamente la divergencia de precios entre activos subyacentes
   * **Solución:** Se reestructuró con puro formato INI/ENV estandarizado.
 * **Shadowing del Módulo y Falta de Carga (E402):** `main.py` intentaba leer `os.getenv` antes de siquiera instanciar el parser del dotenv. A su vez, el orden de imports generaba fallas en linters por no estar en el top-level. 
   * **Solución:** Se movió la carga de `.env` usando `load_dotenv` adentro de la función local `run()` o en métodos dedicados para no romper los PEP-8 ni interferir con la resolución estática de Pylance/Flake8.
+* **Bloqueo del RPC Público de Ankr:** El endpoint RPC de Ankr (`https://rpc.ankr.com/polygon`) dejó de ser público de forma irrestricta y comenzó a devolver errores de autorización exigiendo una API key, provocando la falla del preflight check.
+  * **Solución:** Se migró el parámetro `RPC_URL` del entorno al proveedor alternativo gratuito `https://polygon.drpc.org`, restaurando exitosamente la conectividad.
+
 
 ### C. Type Checking y Linters (Pylance / Flake8 / Mypy)
 * **Tipado de Python 3.9:** Funciones retornando tipados built-in genéricos `dict[str, float]` crasheaban o daban reportes en IDEs antiguos/estrictos.
