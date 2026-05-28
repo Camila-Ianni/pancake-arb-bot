@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import time
+import os
+import sys
 from typing import Dict
 import aiohttp
 import json
+
+# Agregar el directorio raíz al path para que el IDE (Pylance) y Python resuelvan 'models'
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models import BinanceTick, CryptoFeedMetrics, SharedMarketState, SniperAsset
 
