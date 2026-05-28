@@ -52,14 +52,14 @@ class Web3Executor:
             
             if is_dry_run:
                 # Sandbox: Paper Trading Mode
-                await asyncio.sleep(0.05)  # Simular latencia de red
+                await asyncio.sleep(5.0)  # Simular latencia de red prolongada para que se vea en el panel Inflight
                 tx_hash = "0xDRYRUN" + sha1(str(time.time_ns()).encode()).hexdigest()
                 self.metrics.record_sign_ms(0.0)
                 
                 # Simular gas (ej: $0.05 en MATIC) y fill automático
                 invested = req.signal.bet_size_usd
                 simulated_gas_usd = Decimal("0.05")
-                payout = invested + Decimal("2.50")  # Retorno estático simulado
+                payout = invested * Decimal("1.50")  # Retorno estático simulado
                 pnl = payout - invested - simulated_gas_usd
                 
                 result = ExecutionResult(
@@ -74,12 +74,16 @@ class Web3Executor:
                 try:
                     sign_start = time.perf_counter_ns()
                     nonce = await self._acquire_nonce()
+                    
+                    # Simulación de espera realista para firma
+                    await asyncio.sleep(3.0)
+                    
                     tx_hash = self._fast_sign_stub(req=req, nonce=nonce)
                     sign_ms = (time.perf_counter_ns() - sign_start) / 1_000_000
                     self.metrics.record_sign_ms(sign_ms)
 
                     invested = req.signal.bet_size_usd
-                    payout = invested + Decimal("2.50")
+                    payout = invested * Decimal("1.50")
                     pnl = payout - invested
                     result = ExecutionResult(
                         tx_hash=tx_hash,
