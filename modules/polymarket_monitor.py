@@ -52,36 +52,58 @@ class PolymarketMonitor:
         self._ws_connected = False
 
     def _load_market_map(self) -> Dict[SniperAsset, Dict[str, str]]:
-        """Carga el mapeo activo → mercado desde POLYMARKET_MARKETS.
-
-        Formato: "BTC:market_id:condition_id,ETH:...,SOL:...,BNB:..."
-        """
-        raw = os.getenv("POLYMARKET_MARKETS", "")
-        markets: Dict[SniperAsset, Dict[str, str]] = {}
-        for entry in [x.strip() for x in raw.split(",") if x.strip()]:
-            parts = entry.split(":")
-            if len(parts) != 3:
-                continue
-            asset_raw, market_id, condition_id = parts
-            asset = _asset_from_symbol(asset_raw)
-            if asset is None:
-                continue
-            markets[asset] = {"market_id": market_id, "condition_id": condition_id}
-        return markets
+        # La carga inicial está vacía, se actualizará dinámicamente en el bucle
+        return {}
 
     async def start(self) -> None:
         self._running = True
-        # Intentar REST polling primero para tener datos inmediatos
+        updater_task = asyncio.create_task(self._dynamic_market_updater_loop())
+        await asyncio.sleep(2.0)  # Dar tiempo para la carga inicial
+        
         await self._rest_poll_once()
-        # Lanzar WS y REST polling en paralelo
         ws_task = asyncio.create_task(self._ws_loop())
         rest_task = asyncio.create_task(self._rest_poll_loop())
         try:
-            await asyncio.gather(ws_task, rest_task)
+            await asyncio.gather(ws_task, rest_task, updater_task)
         except asyncio.CancelledError:
             ws_task.cancel()
             rest_task.cancel()
+            updater_task.cancel()
             raise
+
+    async def _dynamic_market_updater_loop(self) -> None:
+        """Loop que calcula matemáticamente el bloque HFT de 5 minutos actual
+        e inyecta dinámicamente los hashes reales al motor de arbitraje."""
+        last_interval = 0
+        while self._running:
+            now = int(time.time())
+            current_interval = (now // 300) * 300
+            if current_interval != last_interval:
+                await self._fetch_deterministic_markets(current_interval)
+                last_interval = current_interval
+            await asyncio.sleep(10)
+
+    async def _fetch_deterministic_markets(self, interval: int) -> None:
+        assets_to_check = {
+            SniperAsset.BTC: f"btc-updown-5m-{interval}",
+            SniperAsset.ETH: f"eth-updown-5m-{interval}"
+        }
+        async with aiohttp.ClientSession() as session:
+            for asset, slug in assets_to_check.items():
+                url = f"https://gamma-api.polymarket.com/markets/slug/{slug}"
+                try:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            m_id = data.get("id") or data.get("market_id")
+                            c_id = data.get("conditionId") or data.get("condition_id")
+                            if m_id and c_id:
+                                self._market_map[asset] = {"market_id": str(m_id), "condition_id": str(c_id)}
+                                # Resubscribe al WS
+                                if self._ws and self._ws_connected:
+                                    asyncio.create_task(self._subscribe(self._ws))
+                except Exception:
+                    pass
 
     # ── WebSocket ──────────────────────────────────────────────────────────
 
@@ -233,7 +255,40 @@ class PolymarketMonitor:
             await self._rest_poll_once()
 
     async def _rest_poll_once(self) -> None:
-        """Consulta REST API para obtener precios de los mercados configurados."""
+        """Consulta REST API y auto-actualiza mercados de 5m basándose en el reloj del sistema."""
+        import urllib.request
+        
+        now = int(time.time())
+        current_interval = (now // 300) * 300
+        
+        if not hasattr(self, "_last_interval") or self._last_interval != current_interval:
+            print(f"\n🔄 [MONITOR] Nueva vela HFT detectada ({current_interval}). Resolviendo IDs dinámicamente...")
+            new_map = {}
+            async with aiohttp.ClientSession() as session:
+                for asset_name in ["btc", "eth"]:
+                    slug = f"{asset_name}-updown-5m-{current_interval}"
+                    url = f"https://gamma-api.polymarket.com/markets/slug/{slug}"
+                    try:
+                        async with session.get(url, timeout=3) as resp:
+                            if resp.status == 200:
+                                d = await resp.json()
+                                asset_enum = SniperAsset.BTC if asset_name == "btc" else SniperAsset.ETH
+                                new_map[asset_enum] = {
+                                    "market_id": str(d.get("id") or d.get("market_id")),
+                                    "condition_id": str(d.get("condition_id"))
+                                }
+                                print(f"  ✅ Enlazado {asset_name.upper()} 5m dinámico. ID: {d.get('id')}")
+                    except Exception:
+                        pass
+            if new_map:
+                self._market_map.update(new_map)
+                self._last_interval = current_interval
+                if self._ws_connected and self._ws:
+                    try:
+                        await self._subscribe(self._ws)
+                    except Exception:
+                        pass
+
         if not self._market_map:
             return
         try:
@@ -242,10 +297,7 @@ class PolymarketMonitor:
                     condition_id = data["condition_id"]
                     url = f"{POLYMARKET_REST}/markets/{condition_id}"
                     try:
-                        async with session.get(
-                            url,
-                            timeout=aiohttp.ClientTimeout(total=5),
-                        ) as resp:
+                        async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                             if resp.status != 200:
                                 continue
                             market_data = await resp.json()

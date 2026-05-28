@@ -69,8 +69,9 @@ class ArbitrageEngine:
         if remaining <= 0:
             self._fired_window[asset] = False
             return False
-        if remaining >= self.runtime_cfg.close_window_sec:
-            return False
+            
+        self.runtime_cfg.close_window_sec = 20  # Ventana óptima HFT antes del cierre
+        
         if self._fired_window.get(asset):
             return False
         if asset in self.shared_state.inflight_assets:
@@ -80,28 +81,36 @@ class ArbitrageEngine:
         strike = float(book["strike_price"])
         mark_price = float(self.shared_state.asset_prices.get(asset, 0.0))
 
+        if remaining >= self.runtime_cfg.close_window_sec:
+            if remaining % 10 == 0:
+                print(f"⏳ [{asset.name}] Monitoreando vela de 5m... Quedan {remaining}s para el cierre. Spot: {mark_price:.2f}")
+            return False
+
+        print(f"🎯 [ALERTA SNIPER] ¡{asset.name} en ventana crítica de ejecución! Faltan {remaining}s. Spot: {mark_price} | Strike: {strike} | YES: {yes_price}")
+
         # --- LOG DETALLADO DE ARBITRAJE SIMULADO ---
         is_dry_run = os.getenv("DRY_RUN", "false").lower() in ("true", "1", "yes")
         gross_spread = ((mark_price - strike) / strike * 100) if strike > 0 else 0
         
         decision = "Ejecutaría compra"
         if mark_price <= strike:
-            decision = "Descartado por falta de margen (Spot <= Strike)"
+            decision = "Saltando trade: El precio ya es eficiente"
         elif yes_price >= self.runtime_cfg.yes_price_max:
-            decision = "Descartado por precio YES muy alto"
+            decision = "Saltando trade: Precio YES muy alto"
             
         bet_size = self._compute_dynamic_stake()
-        if decision == "Ejecutaría compra" and bet_size <= Decimal("0"):
-            decision = "Descartado por liquidez USDC insuficiente"
+        if decision == "Ejecutaría compra" and bet_size < Decimal("0.01"):
+            decision = "Saltando trade: Liquidez USDC insuficiente (min 0.01)"
 
-        if is_dry_run:
+        if remaining < 60:
+            print(f"[{asset.name} 5m] -> Segundos restantes: {remaining} | Precio Binance: {mark_price:.2f} | Strike Polymarket: {strike:.2f} | Margen detectado: {gross_spread:.4f}%")
+            if decision != "Ejecutaría compra":
+                print(f"  └ {decision}")
+
+        if is_dry_run and remaining < 60:
             simulated_gas = Decimal("0.05")
             pnl_proj = Decimal("2.50") - simulated_gas if decision == "Ejecutaría compra" else Decimal("0")
-            print(f"\n[SIMULACIÓN OP] Símbolo evaluado: {asset.name}")
-            print(f"  ├ Binance Mark: {mark_price:.2f} | Polymarket YES: {yes_price:.2f}")
-            print(f"  ├ Spread Bruto detectado: {gross_spread:.4f}%")
-            print(f"  ├ PnL Proyectado Neto: ${pnl_proj:.2f} (Gas deducido)")
-            print(f"  └ Decisión: {decision}")
+            print(f"  ├ [SIMULACIÓN OP] PnL Proyectado Neto: ${pnl_proj:.2f} (Gas deducido)")
 
         if decision != "Ejecutaría compra":
             if "USDC" in decision:
@@ -127,12 +136,11 @@ class ArbitrageEngine:
         return True
 
     def _compute_dynamic_stake(self) -> Decimal:
-        # Auto-reinvest: 95% del balance USDC disponible.
         balance = self.shared_state.wallet_usdc_balance
-        if balance < Decimal("1.00"):
+        if balance < Decimal("0.01"):
             return Decimal("0")
         stake = (balance * self.runtime_cfg.stake_usage).quantize(Decimal("0.01"))
-        if stake < Decimal("1.00"):
+        if stake < Decimal("0.01"):
             return Decimal("0")
         return stake
 
