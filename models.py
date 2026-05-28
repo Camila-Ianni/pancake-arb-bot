@@ -5,6 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 from enum import Enum
 from typing import Dict, Optional, Set
+from collections import deque
 
 
 class SniperAsset(str, Enum):
@@ -41,6 +42,7 @@ class SharedMarketState:
         "wallet_usdc_balance",
         "inflight_assets",
         "decision_budget_ms",
+        "log_messages",
     )
 
     def __init__(self, initial_capital_usd: Decimal, sniper_state: SniperState = SniperState.IDLE) -> None:
@@ -61,6 +63,7 @@ class SharedMarketState:
         self.wallet_usdc_balance = initial_capital_usd
         self.inflight_assets = set()
         self.decision_budget_ms = 10.0
+        self.log_messages = deque(maxlen=8)
 
 
 class PolymarketTick:

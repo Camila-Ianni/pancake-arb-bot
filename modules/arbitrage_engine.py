@@ -86,10 +86,10 @@ class ArbitrageEngine:
 
         if remaining >= self.runtime_cfg.close_window_sec:
             if remaining % 10 == 0:
-                print(f"⏳ [{asset.name}] Monitoreando vela de 5m... Quedan {remaining}s para el cierre. Spot: {mark_price:.2f}")
+                self.shared_state.log_messages.append(f"⏳ [{asset.name}] Monitoreando vela de 5m... Quedan {remaining}s para el cierre. Spot: {mark_price:.2f}")
             return False
 
-        print(f"🎯 [ALERTA SNIPER] ¡{asset.name} en ventana crítica de ejecución! Faltan {remaining}s. Spot: {mark_price} | Strike: {strike} | YES: {yes_price}")
+        self.shared_state.log_messages.append(f"🎯 [ALERTA SNIPER] ¡{asset.name} en ventana crítica de ejecución! Faltan {remaining}s. Spot: {mark_price} | Strike: {strike} | YES: {yes_price}")
 
         # --- LOG DETALLADO DE ARBITRAJE SIMULADO ---
         is_dry_run = os.getenv("DRY_RUN", "false").lower() in ("true", "1", "yes")
@@ -99,27 +99,27 @@ class ArbitrageEngine:
         if mark_price <= strike:
             decision = "Saltando trade: El precio ya es eficiente"
             if remaining < 60:
-                logger.info(f"[{asset.name} 5m] Descartado por precio eficiente. Spread: {gross_spread:.4f}% | Spot: {mark_price} | Strike: {strike}")
+                self.shared_state.log_messages.append(f"[{asset.name} 5m] Descartado por precio eficiente. Spread: {gross_spread:.4f}% | Spot: {mark_price} | Strike: {strike}")
         elif yes_price >= self.runtime_cfg.yes_price_max:
             decision = "Saltando trade: Precio YES muy alto"
             if remaining < 60:
-                logger.warning(f"[{asset.name} 5m] Descartado: YES ({yes_price}) > Max ({self.runtime_cfg.yes_price_max}). Spread: {gross_spread:.4f}%")
+                self.shared_state.log_messages.append(f"[{asset.name} 5m] Descartado: YES ({yes_price}) > Max ({self.runtime_cfg.yes_price_max}). Spread: {gross_spread:.4f}%")
             
         bet_size = self._compute_dynamic_stake()
         if decision == "Ejecutaría compra" and bet_size < Decimal("0.01"):
             decision = "Saltando trade: Liquidez USDC insuficiente (min 0.01)"
             if remaining < 60:
-                logger.warning(f"[{asset.name} 5m] Descartado por saldo insuficiente. Spread: {gross_spread:.4f}% | Saldo: {self.shared_state.wallet_usdc_balance}")
+                self.shared_state.log_messages.append(f"[{asset.name} 5m] Descartado por saldo insuficiente. Spread: {gross_spread:.4f}% | Saldo: {self.shared_state.wallet_usdc_balance}")
 
         if remaining < 60:
-            print(f"[{asset.name} 5m] -> Segundos restantes: {remaining} | Precio Binance: {mark_price:.2f} | Strike Polymarket: {strike:.2f} | Margen detectado: {gross_spread:.4f}%")
+            self.shared_state.log_messages.append(f"[{asset.name} 5m] -> Segundos restantes: {remaining} | Precio Binance: {mark_price:.2f} | Strike Polymarket: {strike:.2f} | Margen detectado: {gross_spread:.4f}%")
             if decision != "Ejecutaría compra":
-                print(f"  └ {decision}")
+                self.shared_state.log_messages.append(f"  └ {decision}")
 
         if is_dry_run and remaining < 60:
             simulated_gas = Decimal("0.05")
             pnl_proj = Decimal("2.50") - simulated_gas if decision == "Ejecutaría compra" else Decimal("0")
-            print(f"  ├ [SIMULACIÓN OP] PnL Proyectado Neto: ${pnl_proj:.2f} (Gas deducido)")
+            self.shared_state.log_messages.append(f"  ├ [SIMULACIÓN OP] PnL Proyectado Neto: ${pnl_proj:.2f} (Gas deducido)")
 
         if decision != "Ejecutaría compra":
             if "USDC" in decision:

@@ -82,6 +82,17 @@ def render_panel(shared: SharedMarketState, crypto: CryptoFeed = None, engine: A
         f"Kill Switch: {'ON' if shared.kill_switch else 'OFF'}"
     )
     print("=" * 86)
+    
+    # --- LOGS SECTION ---
+    print("📝 REGISTRO DE EVENTOS & ALERTAS SNIPER")
+    print("-" * 86)
+    # Rellenar con líneas vacías para mantener el alto constante si hay menos de 8 mensajes
+    msgs = list(shared.log_messages)
+    for msg in msgs:
+        print(f" {msg}")
+    for _ in range(8 - len(msgs)):
+        print("")
+    print("=" * 86)
 
 
 async def panel_loop(shared: SharedMarketState, crypto: CryptoFeed, engine: ArbitrageEngine, executor: Web3Executor) -> None:
