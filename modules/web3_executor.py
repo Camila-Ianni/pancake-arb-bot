@@ -11,7 +11,7 @@ import aiohttp
 from typing import Dict, Optional, Any
 
 from eth_account import Account
-from eth_account.messages import encode_structured_data
+from eth_account.messages import encode_typed_data
 
 # Agregar el directorio raíz al path para que el IDE (Pylance) y Python resuelvan 'models'
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -137,7 +137,7 @@ class Web3Executor:
         
         # En una integración completa, aquí se generaría el EIP-712 dict:
         # data = { "types": { "EIP712Domain": [...], "Order": [...] }, "domain": {...}, "message": {...} }
-        # encoded_data = encode_structured_data(data)
+        # encoded_data = encode_typed_data(full_message=data)
         # signature = self._account.sign_message(encoded_data).signature.hex()
         
         # Por seguridad y compatibilidad, construimos el payload estándar esperado por CLOB:
