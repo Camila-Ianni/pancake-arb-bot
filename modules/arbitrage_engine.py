@@ -85,8 +85,14 @@ class ArbitrageEngine:
         self.runtime_cfg.close_window_sec = 20  # Ventana óptima HFT antes del cierre
         
         if self._fired_window.get(asset):
+            if remaining <= 20:
+                # Limitamos el spam, pero lo mostramos al menos una vez
+                if remaining == 19 or remaining == 10:
+                    self.shared_state.log_messages.append(f"👉 [DEBUG] {asset.name} omitido porque _fired_window ya es True.")
             return False
         if asset in self.shared_state.inflight_assets:
+            if remaining <= 20 and (remaining == 19 or remaining == 10):
+                self.shared_state.log_messages.append(f"👉 [DEBUG] {asset.name} omitido porque está inflight.")
             return False
 
         try:
@@ -109,10 +115,9 @@ class ArbitrageEngine:
                 self.shared_state.log_messages.append(f"⏳ [{asset.name}] Monitoreando vela de 5m... Quedan {remaining}s. Spot: {mark_price:.2f}")
             return False
 
+        # --- DENTRO DE LA VENTANA CRÍTICA ---
         self.shared_state.log_messages.append(f"🎯 [ALERTA SNIPER] ¡{asset.name} en ventana crítica de ejecución! Faltan {remaining}s. Spot: {mark_price:.2f} | Strike: {strike:.2f}")
 
-        # --- DETERMINAR LADO GANADOR ---
-        is_dry_run = os.getenv("DRY_RUN", "false").lower() in ("true", "1", "yes")
         if mark_price > strike:
             side = OrderSide.YES
             side_str = "YES"
@@ -125,15 +130,17 @@ class ArbitrageEngine:
         decision = f"Ejecutando apuesta ganadora ({side_str})"
             
         bet_size = self._compute_dynamic_stake()
+        self.shared_state.log_messages.append(f"👉 [DEBUG] bet_size calculado: {bet_size} | saldo: {self.shared_state.wallet_usdc_balance}")
         if bet_size < Decimal("0.01"):
             decision = "Saltando trade: Liquidez USDC insuficiente (min 0.01)"
-            self.shared_state.log_messages.append(f"[{asset.name} 5m] Descartado por saldo insuficiente. Saldo: {self.shared_state.wallet_usdc_balance}")
+            self.shared_state.log_messages.append(f"❌ [{asset.name} 5m] Descartado por saldo insuficiente.")
             self.shared_state.latest_status = "INSUFFICIENT_USDC"
             return False
 
         self.shared_state.log_messages.append(f"[{asset.name} 5m] -> Segundos restantes: {remaining} | Binance: {mark_price:.2f} | Strike: {strike:.2f}")
         self.shared_state.log_messages.append(f"  └ {decision}")
 
+        is_dry_run = os.getenv("DRY_RUN", "false").lower() in ("true", "1", "yes")
         if is_dry_run:
             simulated_gas = Decimal("0.05")
             pnl_proj = Decimal("2.50") - simulated_gas
