@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import time
 import os
+import logging
 from decimal import Decimal
 from typing import Dict, Optional, Union
+
+logger = logging.getLogger(__name__)
 
 from models import (
     EngineMetrics,
@@ -95,12 +98,18 @@ class ArbitrageEngine:
         decision = "Ejecutaría compra"
         if mark_price <= strike:
             decision = "Saltando trade: El precio ya es eficiente"
+            if remaining < 60:
+                logger.info(f"[{asset.name} 5m] Descartado por precio eficiente. Spread: {gross_spread:.4f}% | Spot: {mark_price} | Strike: {strike}")
         elif yes_price >= self.runtime_cfg.yes_price_max:
             decision = "Saltando trade: Precio YES muy alto"
+            if remaining < 60:
+                logger.warning(f"[{asset.name} 5m] Descartado: YES ({yes_price}) > Max ({self.runtime_cfg.yes_price_max}). Spread: {gross_spread:.4f}%")
             
         bet_size = self._compute_dynamic_stake()
         if decision == "Ejecutaría compra" and bet_size < Decimal("0.01"):
             decision = "Saltando trade: Liquidez USDC insuficiente (min 0.01)"
+            if remaining < 60:
+                logger.warning(f"[{asset.name} 5m] Descartado por saldo insuficiente. Spread: {gross_spread:.4f}% | Saldo: {self.shared_state.wallet_usdc_balance}")
 
         if remaining < 60:
             print(f"[{asset.name} 5m] -> Segundos restantes: {remaining} | Precio Binance: {mark_price:.2f} | Strike Polymarket: {strike:.2f} | Margen detectado: {gross_spread:.4f}%")

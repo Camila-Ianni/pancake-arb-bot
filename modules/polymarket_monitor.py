@@ -234,7 +234,17 @@ class PolymarketMonitor:
             strike_raw = message.get("strike_price") or message.get("strike") or 0
             close_raw = message.get("market_close_ts") or message.get("end_ts")
             strike = float(strike_raw) if strike_raw else 0.0
-            close_ts = int(close_raw) if close_raw else int(time.time()) + 300
+            
+            if close_raw:
+                close_ts = int(close_raw)
+            else:
+                cached_ts = self.shared_state.polymarket_books.get(asset, {}).get("market_close_ts")
+                if cached_ts:
+                    close_ts = cached_ts
+                else:
+                    # Deterministic 5-minute boundary
+                    now_ts = int(time.time())
+                    close_ts = (now_ts // 300) * 300 + 300
             return PolymarketTick(
                 asset=asset,
                 market_id=market_id,
@@ -340,10 +350,17 @@ class PolymarketMonitor:
                 yes_price = Decimal(str(tokens[0].get("price", 0)))
 
         end_date = market_data.get("end_date_iso", "")
-        close_ts = int(time.time()) + 300  # default 5 min
+        
+        cached_ts = self.shared_state.polymarket_books.get(asset, {}).get("market_close_ts")
+        if cached_ts:
+            close_ts = cached_ts
+        else:
+            now_ts = int(time.time())
+            close_ts = (now_ts // 300) * 300 + 300
+            
         if end_date:
             try:
-                from datetime import datetime
+                from datetime import datetime, timezone
                 dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
                 close_ts = int(dt.timestamp())
             except Exception:

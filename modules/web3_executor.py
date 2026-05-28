@@ -71,23 +71,29 @@ class Web3Executor:
                     pnl_delta_usd=pnl,
                 )
             else:
-                sign_start = time.perf_counter_ns()
-                nonce = await self._acquire_nonce()
-                tx_hash = self._fast_sign_stub(req=req, nonce=nonce)
-                sign_ms = (time.perf_counter_ns() - sign_start) / 1_000_000
-                self.metrics.record_sign_ms(sign_ms)
+                try:
+                    sign_start = time.perf_counter_ns()
+                    nonce = await self._acquire_nonce()
+                    tx_hash = self._fast_sign_stub(req=req, nonce=nonce)
+                    sign_ms = (time.perf_counter_ns() - sign_start) / 1_000_000
+                    self.metrics.record_sign_ms(sign_ms)
 
-                invested = req.signal.bet_size_usd
-                payout = invested + Decimal("2.50")
-                pnl = payout - invested
-                result = ExecutionResult(
-                    tx_hash=tx_hash,
-                    ok=True,
-                    asset=req.signal.asset,
-                    invested_usd=invested,
-                    payout_usd=payout,
-                    pnl_delta_usd=pnl,
-                )
+                    invested = req.signal.bet_size_usd
+                    payout = invested + Decimal("2.50")
+                    pnl = payout - invested
+                    result = ExecutionResult(
+                        tx_hash=tx_hash,
+                        ok=True,
+                        asset=req.signal.asset,
+                        invested_usd=invested,
+                        payout_usd=payout,
+                        pnl_delta_usd=pnl,
+                    )
+                except Exception as e:
+                    self.shared_state.latest_status = f"ERROR EJECUCIÓN: {e}"
+                    # No incrementamos metricas ok, devolvemos un result fallido
+                    self.metrics.sent += 1
+                    continue
 
             self.metrics.sent += 1
             self.metrics.ok += 1
