@@ -101,7 +101,29 @@ class PolymarketMonitor:
                             m = markets_list[0]
                             m_id = m.get("id") or m.get("market_id")
                             c_id = m.get("conditionId") or m.get("condition_id")
-                            strike_val = float(m.get("line") or m.get("strike") or 0.0)
+                            
+                            import re
+                            title_str = m.get("title", "")
+                            slug_str = m.get("slug", "")
+                            strike_val = 0.0
+
+                            match = re.search(r'(?:above|below)\s+([\d,.]+)', title_str, re.IGNORECASE)
+                            if match:
+                                try:
+                                    strike_val = float(match.group(1).replace(",", ""))
+                                except ValueError:
+                                    pass
+
+                            if strike_val == 0.0:
+                                nums = re.findall(r'\d+(?:\.\d+)?', slug_str)
+                                if nums:
+                                    valid_nums = [float(n) for n in nums if float(n) < 200000 or (asset == SniperAsset.BTC and float(n) > 20000)]
+                                    if valid_nums:
+                                        strike_val = valid_nums[0]
+
+                            if strike_val == 0.0:
+                                self.shared_state.log_messages.append(f"⚠️ [STRIKE ERROR] Título: {title_str[:20]} | Slug: {slug_str[:20]}")
+
                             if m_id and c_id:
                                 self._market_map[asset] = {
                                     "market_id": str(m_id), 
@@ -289,7 +311,28 @@ class PolymarketMonitor:
                                     m = markets_list[0]
                                     m_id = str(m.get("id") or m.get("market_id"))
                                     c_id = str(m.get("conditionId") or m.get("condition_id"))
-                                    strike_val = float(m.get("line") or m.get("strike") or 0.0)
+                                    
+                                    import re
+                                    title_str = m.get("title", "")
+                                    slug_str = m.get("slug", "")
+                                    strike_val = 0.0
+
+                                    match = re.search(r'(?:above|below)\s+([\d,.]+)', title_str, re.IGNORECASE)
+                                    if match:
+                                        try:
+                                            strike_val = float(match.group(1).replace(",", ""))
+                                        except ValueError:
+                                            pass
+
+                                    if strike_val == 0.0:
+                                        nums = re.findall(r'\d+(?:\.\d+)?', slug_str)
+                                        if nums:
+                                            valid_nums = [float(n) for n in nums if float(n) < 200000 or (asset_name == "btc" and float(n) > 20000)]
+                                            if valid_nums:
+                                                strike_val = valid_nums[0]
+
+                                    if strike_val == 0.0:
+                                        self.shared_state.log_messages.append(f"⚠️ [STRIKE ERROR] Título: {title_str[:20]} | Slug: {slug_str[:20]}")
                                     asset_enum = SniperAsset.BTC if asset_name == "btc" else SniperAsset.ETH
                                     
                                     if asset_enum not in new_map or interval == current_interval:
