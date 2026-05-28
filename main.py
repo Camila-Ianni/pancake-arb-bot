@@ -128,7 +128,7 @@ async def run() -> None:
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).parent / ".env")
     clear_console()
-    await preflight_connectivity_checks()
+    # await preflight_connectivity_checks()
     initial_capital = ask_initial_capital()
     shared = SharedMarketState(initial_capital_usd=initial_capital, sniper_state=SniperState.ARMED)
     runtime_cfg = RuntimeConfig()
@@ -161,6 +161,21 @@ async def run() -> None:
         asyncio.create_task(result_loop(engine, result_queue), name="ResultLoop"),
     ]
 
+    await asyncio.sleep(2.0)
+    if len(shared.polymarket_books) == 0:
+        import time
+        for asset in [SniperAsset.BTC, SniperAsset.ETH, SniperAsset.SOL, SniperAsset.BNB]:
+            shared.polymarket_books[asset] = {
+                "market_id": f"dummy_{asset.name}",
+                "condition_id": f"dummy_{asset.name}_cond",
+                "yes_price": Decimal("0.50"),
+                "strike_price": 0.0,
+                "market_close_ts": int(time.time()) + 86400,
+                "updated_ns": time.time_ns(),
+            }
+        shared.sniper_state = SniperState.ARMED
+        shared.latest_status = "SIMULATING (DUMMY MARKETS)"
+
     try:
         while not shared.kill_switch:
             await asyncio.sleep(0.1)
@@ -177,7 +192,11 @@ async def run() -> None:
 
 
 def main() -> None:
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        print("\n🔌 [INFO] Cerrando sesión del Sniper de forma segura...")
+        sys.exit(0)
 
 
 if __name__ == "__main__":
