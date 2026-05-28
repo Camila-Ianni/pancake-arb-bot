@@ -28,6 +28,12 @@ from models import MarketMonitorMetrics, PolymarketTick, SharedMarketState, Snip
 POLYMARKET_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 POLYMARKET_REST = "https://clob.polymarket.com"
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+    "Referer": "https://polymarket.com/"
+}
+
 
 def _asset_from_symbol(symbol: str) -> Optional[SniperAsset]:
     up = symbol.upper()
@@ -48,6 +54,7 @@ class PolymarketMonitor:
         self.metrics = MarketMonitorMetrics()
         self._running = False
         self._ws = None
+        self._session: Optional[aiohttp.ClientSession] = None
         self._market_map = self._load_market_map()
         self._ws_connected = False
 
@@ -57,6 +64,7 @@ class PolymarketMonitor:
 
     async def start(self) -> None:
         self._running = True
+        self._session = aiohttp.ClientSession(headers=HEADERS)
         updater_task = asyncio.create_task(self._dynamic_market_updater_loop())
         await asyncio.sleep(2.0)  # Dar tiempo para la carga inicial
         
@@ -84,15 +92,16 @@ class PolymarketMonitor:
             await asyncio.sleep(10)
 
     async def _fetch_deterministic_markets(self, interval: int) -> None:
+        if not self._session:
+            return
         assets_to_check = {
             SniperAsset.BTC: f"btc-updown-5m-{interval}",
             SniperAsset.ETH: f"eth-updown-5m-{interval}"
         }
-        async with aiohttp.ClientSession() as session:
-            for asset, slug in assets_to_check.items():
-                url = f"https://gamma-api.polymarket.com/events/slug/{slug}"
-                try:
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+        for asset, slug in assets_to_check.items():
+            url = f"https://gamma-api.polymarket.com/events/slug/{slug}"
+            try:
+                async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                         if resp.status == 200:
                             data = await resp.json()
                             markets_list = data.get("markets", [])
@@ -137,7 +146,7 @@ class PolymarketMonitor:
                         else:
                             self.shared_state.log_messages.append(f"❌ [API ERR] {slug} Status: {resp.status}")
                 except Exception as e:
-                    self.shared_state.log_messages.append(f"❌ [NET EXCEPTION] -> {str(e)}")
+                    self.shared_state.log_messages.append(f"❌ [NET EXCEPTION] -> {repr(e)}")
 
     # ── WebSocket ──────────────────────────────────────────────────────────
 
@@ -301,13 +310,13 @@ class PolymarketMonitor:
         if not hasattr(self, "_last_interval") or self._last_interval != current_interval:
             print(f"\n🔄 [MONITOR] Resolviendo IDs dinámicamente para intervalos HFT...")
             new_map = {}
-            async with aiohttp.ClientSession() as session:
+            if self._session:
                 for asset_name in ["btc", "eth"]:
                     for interval in intervals_to_check:
                         slug = f"{asset_name}-updown-5m-{interval}"
                         url = f"https://gamma-api.polymarket.com/events/slug/{slug}"
                         try:
-                            async with session.get(url, timeout=3) as resp:
+                            async with self._session.get(url, timeout=3) as resp:
                                 if resp.status == 200:
                                     d = await resp.json()
                                     markets_list = d.get("markets", [])
@@ -353,7 +362,7 @@ class PolymarketMonitor:
                                 else:
                                     self.shared_state.log_messages.append(f"❌ [API ERR] {slug} Status: {resp.status}")
                         except Exception as e:
-                            self.shared_state.log_messages.append(f"❌ [NET EXCEPTION] -> {str(e)}")
+                            self.shared_state.log_messages.append(f"❌ [NET EXCEPTION] -> {repr(e)}")
             if new_map:
                 self._market_map.update(new_map)
                 self._last_interval = current_interval
@@ -378,22 +387,22 @@ class PolymarketMonitor:
             self._market_map.pop(a, None)
             self.shared_state.polymarket_books.pop(a, None)
 
-        if not self._market_map:
+        if not self._market_map or not self._session:
             return
 
         try:
-            async with aiohttp.ClientSession() as session:
-                for asset, data in list(self._market_map.items()):
-                    condition_id = data["condition_id"]
-                    url = f"{POLYMARKET_REST}/markets/{condition_id}"
-                    try:
-                        async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                            if resp.status != 200:
-                                continue
-                            market_data = await resp.json()
-                            self._process_rest_market(asset, data, market_data)
-                    except Exception:
-                        continue
+            for asset, data in list(self._market_map.items()):
+                condition_id = data["condition_id"]
+                url = f"{POLYMARKET_REST}/markets/{condition_id}"
+                try:
+                    async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                        if resp.status != 200:
+                            continue
+                        market_data = await resp.json()
+                        self._process_rest_market(asset, data, market_data)
+                except Exception as e:
+                    self.shared_state.log_messages.append(f"❌ [REST EXCEPTION] -> {repr(e)}")
+                    continue
         except Exception:
             pass
 
@@ -449,6 +458,8 @@ class PolymarketMonitor:
                 await self._ws.close()
             except Exception:
                 pass
+        if self._session is not None:
+            await self._session.close()
 
     def get_status(self) -> Dict[str, float]:
         return {
