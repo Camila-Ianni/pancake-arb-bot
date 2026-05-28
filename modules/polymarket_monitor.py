@@ -15,6 +15,7 @@ import time
 from decimal import Decimal
 from typing import Dict, Optional
 import sys
+import socket
 
 import aiohttp
 import json
@@ -33,6 +34,25 @@ HEADERS = {
     "Accept": "application/json",
     "Referer": "https://polymarket.com/"
 }
+
+class GammaDNSBypassResolver(aiohttp.abc.AbstractResolver):
+    """Custom DNS resolver para evadir bloqueos a nivel de ISP / DNS Spoofing.
+    Redirige directamente a la IP de Cloudflare (Anycast) para gamma-api.polymarket.com,
+    manteniendo intactos el SNI y el header Host."""
+    async def resolve(self, host: str, port: int, family: int) -> list:
+        if host == 'gamma-api.polymarket.com':
+            return [{
+                'hostname': host,
+                'host': '104.18.34.205',
+                'port': port,
+                'family': family,
+                'proto': 0,
+                'flags': socket.AI_NUMERICHOST,
+            }]
+        return await aiohttp.DefaultResolver().resolve(host, port, family)
+
+    async def close(self) -> None:
+        pass
 
 
 def _asset_from_symbol(symbol: str) -> Optional[SniperAsset]:
@@ -64,7 +84,8 @@ class PolymarketMonitor:
 
     async def start(self) -> None:
         self._running = True
-        self._session = aiohttp.ClientSession(headers=HEADERS)
+        connector = aiohttp.TCPConnector(resolver=GammaDNSBypassResolver())
+        self._session = aiohttp.ClientSession(connector=connector, headers=HEADERS)
         updater_task = asyncio.create_task(self._dynamic_market_updater_loop())
         await asyncio.sleep(2.0)  # Dar tiempo para la carga inicial
         
