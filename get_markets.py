@@ -1,62 +1,70 @@
 import urllib.request
 import json
+import os
 
-print("🔄 Conectando con la API de Polymarket para buscar mercados activos...")
+print("🔄 Conectando con la API Gamma de Polymarket para buscar mercados activos de precios...")
+url = "https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&q=price"
+
 try:
-    markets = []
-    cursor = ""
-    for _ in range(10):
-        url = "https://clob.polymarket.com/markets"
-        if cursor:
-            url += f"?next_cursor={cursor}"
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "Mozilla/5.0"}
-        )
-        with urllib.request.urlopen(req) as response:
-            raw_data = json.loads(response.read().decode())
-            
-        page_markets = []
-        if isinstance(raw_data, list):
-            page_markets = raw_data
-        elif isinstance(raw_data, dict):
-            page_markets = raw_data.get("data", raw_data.get("markets", raw_data.get("results", [])))
-            cursor = raw_data.get("next_cursor", "")
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req) as response:
+        markets = json.loads(response.read().decode())
         
-        markets.extend(page_markets)
-        if not cursor:
-            break
-
-
-    found = {"BTC": [], "ETH": [], "SOL": [], "BNB": []}
+    found = {"BTC": None, "ETH": None, "SOL": None, "BNB": None}
+    
     for m in markets:
         if not isinstance(m, dict):
             continue
+            
         question = str(m.get("question", "")).lower()
         slug = str(m.get("slug", "")).lower()
-        market_id = m.get("market_id") or m.get("id")
-        condition_id = m.get("condition_id")
+        title = str(m.get("title", "")).lower()
+        
+        market_id = m.get("id") or m.get("market_id")
+        condition_id = m.get("conditionId") or m.get("condition_id")
         
         if not market_id or not condition_id:
             continue
             
-        if "bitcoin" in question or "btc" in slug:
-            found["BTC"].append((market_id, condition_id, m.get("question")))
-        elif "ethereum" in question or "eth" in slug:
-            found["ETH"].append((market_id, condition_id, m.get("question")))
-        elif "solana" in question or "sol" in slug:
-            found["SOL"].append((market_id, condition_id, m.get("question")))
-        elif "binance" in question or "bnb" in slug:
-            found["BNB"].append((market_id, condition_id, m.get("question")))
+        combined_text = question + " " + slug + " " + title
+        
+        if not found["BTC"] and ("bitcoin" in combined_text or "btc" in combined_text):
+            found["BTC"] = f"BTC:{market_id}:{condition_id}"
+        elif not found["ETH"] and ("ethereum" in combined_text or "eth" in combined_text):
+            found["ETH"] = f"ETH:{market_id}:{condition_id}"
+        elif not found["SOL"] and ("solana" in combined_text or "sol" in combined_text):
+            found["SOL"] = f"SOL:{market_id}:{condition_id}"
+        elif not found["BNB"] and ("binance" in combined_text or "bnb" in combined_text):
+            found["BNB"] = f"BNB:{market_id}:{condition_id}"
 
-    print("\n🚀 ¡Mercados encontrados! Copiá y armá tu línea para el .env:\n")
-    for asset, items in found.items():
-        print(f"🔹 Opciones para {asset}:")
-        if not items:
-            print("  No se encontraron mercados de precio activos en este lote.")
-        for item in items[:2]:
-            print(f"  📌 Pregunta: {item[2]}")
-            print(f"  ID completo: {asset}:{item[0]}:{item[1]}")
-        print("-" * 50)
+    final_parts = []
+    print("\n🚀 ¡Mercados encontrados y extraídos!\n")
+    for asset, formatted in found.items():
+        if formatted:
+            print(f"✅ {asset} encontrado -> {formatted}")
+            final_parts.append(formatted)
+        else:
+            print(f"⚠️ {asset} no encontrado en este lote. Usando fallback estático.")
+            dummy = f"0x{'0'*61}{asset.lower()}"
+            final_parts.append(f"{asset}:{dummy}:{dummy}")
+            
+    final_string = ",".join(final_parts)
+    print(f"\n⚙️ Cadena generada para el .env:\nPOLYMARKET_MARKETS={final_string}\n")
+    
+    env_path = ".env"
+    if os.path.exists(env_path):
+        with open(env_path, "r") as f:
+            lines = f.readlines()
+            
+        with open(env_path, "w") as f:
+            for line in lines:
+                if line.startswith("POLYMARKET_MARKETS="):
+                    f.write(f"POLYMARKET_MARKETS={final_string}\n")
+                else:
+                    f.write(line)
+        print("✅ ¡Archivo .env parcheado automáticamente de forma exitosa!")
+    else:
+        print("❌ Archivo .env no encontrado en la ruta local.")
+        
 except Exception as e:
-    print(f"❌ Ocurrió un problema al escanear Polymarket: {e}")
+    print(f"❌ Ocurrió un problema al escanear Gamma API: {e}")
