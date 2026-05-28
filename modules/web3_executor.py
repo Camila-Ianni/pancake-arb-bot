@@ -7,11 +7,9 @@ import time
 import os
 import sys
 from decimal import Decimal
-import aiohttp
+import subprocess
+import json
 from typing import Dict, Optional, Any
-
-from eth_account import Account
-from eth_account.messages import encode_typed_data
 
 # Agregar el directorio raíz al path para que el IDE (Pylance) y Python resuelvan 'models'
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -41,10 +39,14 @@ class Web3Executor:
         # 1. Cargar dependencias de entorno de Producción
         self.private_key = os.getenv("PRIVATE_KEY")
         self.api_key = os.getenv("POLYMARKET_API_KEY")
+        self.api_secret = os.getenv("POLYMARKET_SECRET")
+        self.api_passphrase = os.getenv("POLYMARKET_PASSPHRASE")
         self.wallet_address = os.getenv("WALLET_ADDRESS")
         
         if not self.private_key:
             self.shared_state.log_messages.append("⚠️ [ERROR CRÍTICO] PRIVATE_KEY no configurada. Ejecución en vivo fallará.")
+        if not self.api_secret or not self.api_passphrase:
+            self.shared_state.log_messages.append("⚠️ [ERROR CRÍTICO] Faltan POLYMARKET_SECRET o POLYMARKET_PASSPHRASE en el .env.")
             
         self._account = Account.from_key(self.private_key) if self.private_key else None
         self._session: Optional[aiohttp.ClientSession] = None
@@ -126,44 +128,40 @@ class Web3Executor:
 
     async def _execute_live_order(self, req: ExecutionRequest) -> tuple[str, bool, Decimal, Decimal]:
         """
-        Resuelve el token_id, construye la firma EIP-712 nativa y envía la orden.
+        Resuelve el token_id y delega el firmado complejo L1/L2 al SDK oficial en JS.
         """
         # Calcular precio y tamaño
         price = req.signal.yes_price if req.side == OrderSide.YES else (Decimal("1.00") - req.signal.yes_price)
         size = req.signal.bet_size_usd
-        
-        # Resolver token_id (esto asume que el market_id incluye el hash o se usa el id del activo)
         token_id = req.signal.market_id
+        side_str = "BUY"
         
-        # En una integración completa, aquí se generaría el EIP-712 dict:
-        # data = { "types": { "EIP712Domain": [...], "Order": [...] }, "domain": {...}, "message": {...} }
-        # encoded_data = encode_typed_data(full_message=data)
-        # signature = self._account.sign_message(encoded_data).signature.hex()
+        script_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "execute_order.js")
         
-        # Por seguridad y compatibilidad, construimos el payload estándar esperado por CLOB:
-        payload = {
-            "tokenID": token_id,
-            "price": float(price),
-            "side": "BUY",
-            "size": float(size),
-            "feeRateBps": 0,
-            "signature": "0xNATIVE_SIGNATURE_PLACEHOLDER" # Placeholder estandarizado
-        }
+        # Ejecutar de forma no bloqueante
+        proc = await asyncio.create_subprocess_exec(
+            "node", script_path, str(token_id), str(price), side_str, str(size),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        stdout, stderr = await proc.communicate()
         
         try:
-            async with self._session.post(f"{CLOB_API_URL}/order", json=payload, timeout=5) as resp:
-                if resp.status in (200, 201):
-                    data = await resp.json()
-                    order_id = data.get("orderID", f"0xREAL_ORDER_{int(time.time())}")
-                    
-                    # Como es real, no tenemos 'payout' inmediato. Invertimos size, esperamos resolución.
-                    return order_id, True, size, Decimal("0")
-                else:
-                    text = await resp.text()
-                    raise Exception(f"HTTP {resp.status} - {text}")
-        except Exception as e:
-            # Propagar error para que el bloque except del worker cancele y limpie el inflight
-            raise e
+            output = stdout.decode().strip()
+            # Si el script imprime múltiples cosas (como logs de depuración), tomamos la última línea
+            last_line = output.split('\n')[-1] if output else "{}"
+            result = json.loads(last_line)
+            
+            if result.get("ok"):
+                order_id = result.get("orderId", f"0xREAL_ORDER_{int(time.time())}")
+                return order_id, True, size, Decimal("0")
+            else:
+                error_msg = result.get("error", "Unknown error")
+                raise Exception(f"Rechazado por SDK: {error_msg}")
+        except json.JSONDecodeError:
+            err_text = stderr.decode().strip() or stdout.decode().strip()
+            raise Exception(f"Fallo en SDK (No JSON): {err_text}")
 
     async def _profit_sweep_if_needed(self, result: ExecutionResult) -> None:
         if not self.runtime_cfg.profit_sweep_enabled or not result.ok:
