@@ -102,51 +102,51 @@ class PolymarketMonitor:
             url = f"https://gamma-api.polymarket.com/events/slug/{slug}"
             try:
                 async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            markets_list = data.get("markets", [])
-                            if not markets_list:
-                                self.shared_state.log_messages.append(f"⚠️ [API VACÍA] {slug} sin mercados")
-                                continue
-                            m = markets_list[0]
-                            m_id = m.get("id") or m.get("market_id")
-                            c_id = m.get("conditionId") or m.get("condition_id")
-                            
-                            import re
-                            title_str = m.get("title", "")
-                            slug_str = m.get("slug", "")
-                            strike_val = 0.0
+                    if resp.status == 200:
+                        data = await resp.json()
+                        markets_list = data.get("markets", [])
+                        if not markets_list:
+                            self.shared_state.log_messages.append(f"⚠️ [API VACÍA] {slug} sin mercados")
+                            continue
+                        m = markets_list[0]
+                        m_id = m.get("id") or m.get("market_id")
+                        c_id = m.get("conditionId") or m.get("condition_id")
+                        
+                        import re
+                        title_str = m.get("title", "")
+                        slug_str = m.get("slug", "")
+                        strike_val = 0.0
 
-                            match = re.search(r'(?:above|below)\s+([\d,.]+)', title_str, re.IGNORECASE)
-                            if match:
-                                try:
-                                    strike_val = float(match.group(1).replace(",", ""))
-                                except ValueError:
-                                    pass
+                        match = re.search(r'(?:above|below)\s+([\d,.]+)', title_str, re.IGNORECASE)
+                        if match:
+                            try:
+                                strike_val = float(match.group(1).replace(",", ""))
+                            except ValueError:
+                                pass
 
-                            if strike_val == 0.0:
-                                nums = re.findall(r'\d+(?:\.\d+)?', slug_str)
-                                if nums:
-                                    valid_nums = [float(n) for n in nums if float(n) < 200000 or (asset == SniperAsset.BTC and float(n) > 20000)]
-                                    if valid_nums:
-                                        strike_val = valid_nums[0]
+                        if strike_val == 0.0:
+                            nums = re.findall(r'\d+(?:\.\d+)?', slug_str)
+                            if nums:
+                                valid_nums = [float(n) for n in nums if float(n) < 200000 or (asset == SniperAsset.BTC and float(n) > 20000)]
+                                if valid_nums:
+                                    strike_val = valid_nums[0]
 
-                            if strike_val == 0.0:
-                                self.shared_state.log_messages.append(f"⚠️ [STRIKE ERROR] Título: {title_str[:20]} | Slug: {slug_str[:20]}")
+                        if strike_val == 0.0:
+                            self.shared_state.log_messages.append(f"⚠️ [STRIKE ERROR] Título: {title_str[:20]} | Slug: {slug_str[:20]}")
 
-                            if m_id and c_id:
-                                self._market_map[asset] = {
-                                    "market_id": str(m_id), 
-                                    "condition_id": str(c_id),
-                                    "market_close_ts": interval + 300,
-                                    "strike_price": strike_val
-                                }
-                                if self._ws and self._ws_connected:
-                                    asyncio.create_task(self._subscribe(self._ws))
-                        else:
-                            self.shared_state.log_messages.append(f"❌ [API ERR] {slug} Status: {resp.status}")
-                except Exception as e:
-                    self.shared_state.log_messages.append(f"❌ [NET EXCEPTION] -> {repr(e)}")
+                        if m_id and c_id:
+                            self._market_map[asset] = {
+                                "market_id": str(m_id), 
+                                "condition_id": str(c_id),
+                                "market_close_ts": interval + 300,
+                                "strike_price": strike_val
+                            }
+                            if self._ws and self._ws_connected:
+                                asyncio.create_task(self._subscribe(self._ws))
+                    else:
+                        self.shared_state.log_messages.append(f"❌ [API ERR] {slug} Status: {resp.status}")
+            except Exception as e:
+                self.shared_state.log_messages.append(f"❌ [NET EXCEPTION] -> {repr(e)}")
 
     # ── WebSocket ──────────────────────────────────────────────────────────
 
