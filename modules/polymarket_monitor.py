@@ -294,9 +294,21 @@ class PolymarketMonitor:
                                         continue
                                     m = markets_list[0]
                                     
+                                    if interval == current_interval:
+                                        self.shared_state.log_messages.append(f"🔍 DEBUG KEYS: {list(m.keys())}")
+                                    
                                     m_id = str(m.get("id") or m.get("market_id"))
                                     c_id = str(m.get("conditionId") or m.get("condition_id"))
-                                    strike_val = float(m.get("line") or m.get("strike") or 0)
+                                    
+                                    strike_val = float(m.get("line") or m.get("strike") or 0.0)
+                                    if strike_val == 0.0:
+                                        import re
+                                        txt = str(m.get("question", "")) + " " + str(m.get("title", "")) + " " + str(m.get("groupItemTitle", ""))
+                                        match = re.search(r"(\d{3,}\.\d+|\d{3,})", txt)
+                                        if match:
+                                            strike_val = float(match.group(1))
+                                            if interval == current_interval:
+                                                self.shared_state.log_messages.append(f"🔍 [REGEX] Strike rescatado: {strike_val}")
                                     
                                     asset_enum = SniperAsset.BTC if asset_name == "btc" else SniperAsset.ETH
                                     
