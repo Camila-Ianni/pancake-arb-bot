@@ -235,16 +235,14 @@ class PolymarketMonitor:
             close_raw = message.get("market_close_ts") or message.get("end_ts")
             strike = float(strike_raw) if strike_raw else 0.0
             
-            if close_raw:
-                close_ts = int(close_raw)
+            # Ignorar el timestamp de la API ya que devuelve horas genéricas (ej: 00:00 UTC) para eventos dinámicos.
+            # Tomar el valor matemático del mapeo que hicimos en REST.
+            cached_map = self._market_map.get(asset, {})
+            if "market_close_ts" in cached_map:
+                close_ts = cached_map["market_close_ts"]
             else:
-                cached_ts = self.shared_state.polymarket_books.get(asset, {}).get("market_close_ts")
-                if cached_ts:
-                    close_ts = cached_ts
-                else:
-                    # Deterministic 5-minute boundary
-                    now_ts = int(time.time())
-                    close_ts = (now_ts // 300) * 300 + 300
+                now_ts = int(time.time())
+                close_ts = (now_ts // 300) * 300 + 300
             return PolymarketTick(
                 asset=asset,
                 market_id=market_id,
@@ -301,7 +299,8 @@ class PolymarketMonitor:
                                     if asset_enum not in new_map or interval == current_interval:
                                         new_map[asset_enum] = {
                                             "market_id": m_id,
-                                            "condition_id": c_id
+                                            "condition_id": c_id,
+                                            "market_close_ts": interval + 300
                                         }
                                         label = "Current" if interval == current_interval else "Next/Pre-cache"
                                         print(f"  ✅ Enlazado {asset_name.upper()} 5m dinámico ({label}). ID: {m_id}")
@@ -353,22 +352,10 @@ class PolymarketMonitor:
             if tokens:
                 yes_price = Decimal(str(tokens[0].get("price", 0)))
 
-        end_date = market_data.get("end_date_iso", "")
-        
-        cached_ts = self.shared_state.polymarket_books.get(asset, {}).get("market_close_ts")
-        if cached_ts:
-            close_ts = cached_ts
-        else:
+        close_ts = map_data.get("market_close_ts")
+        if not close_ts:
             now_ts = int(time.time())
             close_ts = (now_ts // 300) * 300 + 300
-            
-        if end_date:
-            try:
-                from datetime import datetime, timezone
-                dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
-                close_ts = int(dt.timestamp())
-            except Exception:
-                pass
 
         tick = PolymarketTick(
             asset=asset,
