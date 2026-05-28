@@ -237,9 +237,9 @@ class PolymarketMonitor:
         try:
             yes_price = Decimal(str(yes_raw))
             
-            cached_map = self._market_map.get(asset, {})
-            strike = cached_map.get("strike_price", 0.0)
-            close_ts = cached_map.get("market_close_ts", (int(time.time()) // 300) * 300 + 300)
+            cached_data = self._market_map.get(asset, {})
+            strike = cached_data.get("strike_price", 0.0)
+            close_ts = cached_data.get("market_close_ts", int(time.time()) + 300)
             
             return PolymarketTick(
                 asset=asset,
