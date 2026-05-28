@@ -101,9 +101,14 @@ class PolymarketMonitor:
                             m = markets_list[0]
                             m_id = m.get("id") or m.get("market_id")
                             c_id = m.get("conditionId") or m.get("condition_id")
+                            strike_val = float(m.get("line") or m.get("strike") or 0.0)
                             if m_id and c_id:
-                                self._market_map[asset] = {"market_id": str(m_id), "condition_id": str(c_id)}
-                                # Resubscribe al WS
+                                self._market_map[asset] = {
+                                    "market_id": str(m_id), 
+                                    "condition_id": str(c_id),
+                                    "market_close_ts": interval + 300,
+                                    "strike_price": strike_val
+                                }
                                 if self._ws and self._ws_connected:
                                     asyncio.create_task(self._subscribe(self._ws))
                 except Exception:
@@ -231,22 +236,11 @@ class PolymarketMonitor:
 
         try:
             yes_price = Decimal(str(yes_raw))
-            strike_raw = message.get("strike_price") or message.get("strike") or 0
-            close_raw = message.get("market_close_ts") or message.get("end_ts")
-            strike = float(strike_raw) if strike_raw else 0.0
             
-            # Ignorar el timestamp de la API ya que devuelve horas genéricas (ej: 00:00 UTC) para eventos dinámicos.
-            # Tomar el valor matemático del mapeo que hicimos en REST.
             cached_map = self._market_map.get(asset, {})
+            strike = cached_map.get("strike_price", 0.0)
+            close_ts = cached_map.get("market_close_ts", (int(time.time()) // 300) * 300 + 300)
             
-            if strike == 0.0 and "strike_price" in cached_map:
-                strike = cached_map["strike_price"]
-                
-            if "market_close_ts" in cached_map:
-                close_ts = cached_map["market_close_ts"]
-            else:
-                now_ts = int(time.time())
-                close_ts = (now_ts // 300) * 300 + 300
             return PolymarketTick(
                 asset=asset,
                 market_id=market_id,
@@ -293,26 +287,11 @@ class PolymarketMonitor:
                                     if not markets_list:
                                         continue
                                     m = markets_list[0]
-                                    
-                                    if interval == current_interval:
-                                        self.shared_state.log_messages.append(f"🔍 DEBUG KEYS: {list(m.keys())}")
-                                    
                                     m_id = str(m.get("id") or m.get("market_id"))
                                     c_id = str(m.get("conditionId") or m.get("condition_id"))
-                                    
                                     strike_val = float(m.get("line") or m.get("strike") or 0.0)
-                                    if strike_val == 0.0:
-                                        import re
-                                        txt = str(m.get("question", "")) + " " + str(m.get("title", "")) + " " + str(m.get("groupItemTitle", ""))
-                                        match = re.search(r"(\d{3,}\.\d+|\d{3,})", txt)
-                                        if match:
-                                            strike_val = float(match.group(1))
-                                            if interval == current_interval:
-                                                self.shared_state.log_messages.append(f"🔍 [REGEX] Strike rescatado: {strike_val}")
-                                    
                                     asset_enum = SniperAsset.BTC if asset_name == "btc" else SniperAsset.ETH
                                     
-                                    # Solo sobrescribimos si es el current_interval, para no pisar un activo con un futuro si ya tenemos el de ahora
                                     if asset_enum not in new_map or interval == current_interval:
                                         new_map[asset_enum] = {
                                             "market_id": m_id,
@@ -321,7 +300,7 @@ class PolymarketMonitor:
                                             "strike_price": strike_val
                                         }
                                         label = "Current" if interval == current_interval else "Next/Pre-cache"
-                                        print(f"  ✅ Enlazado {asset_name.upper()} 5m dinámico ({label}). ID: {m_id}")
+                                        print(f"  ✅ Enlazado {asset_name.upper()} 5m dinámico ({label}). ID: {m_id} | Strike: {strike_val}")
                         except Exception:
                             pass
             if new_map:
@@ -330,8 +309,7 @@ class PolymarketMonitor:
                 if self._ws_connected and self._ws:
                     try:
                         await self._subscribe(self._ws)
-                    except Exception as e:
-                        self.shared_state.log_messages.append(f"❌ [MONITOR] Exception HTTP en Gamma Events: {e}")
+                    except Exception:
                         pass
 
         if not self._market_map:
@@ -347,17 +325,13 @@ class PolymarketMonitor:
                                 continue
                             market_data = await resp.json()
                             self._process_rest_market(asset, data, market_data)
-                    except Exception as e:
-                        self.shared_state.log_messages.append(f"❌ [MONITOR] Exception REST /markets: {e}")
+                    except Exception:
                         continue
-        except Exception as e:
-            self.shared_state.log_messages.append(f"❌ [MONITOR] Exception general REST poll: {e}")
+        except Exception:
             pass
 
-    def _process_rest_market(
-        self, asset: SniperAsset, map_data: Dict[str, str], market_data: dict
-    ) -> None:
-        """Procesa datos de un mercado desde la REST API."""
+    def _process_rest_market(self, asset: SniperAsset, map_data: Dict[str, str], market_data: dict) -> None:
+        """Procesa datos de un mercado desde la REST API utilizando el caché purificado."""
         tokens = market_data.get("tokens", [])
         yes_price = Decimal("0")
         for token in tokens:
@@ -365,24 +339,18 @@ class PolymarketMonitor:
             if outcome == "YES":
                 yes_price = Decimal(str(token.get("price", 0)))
                 break
-        if yes_price <= 0:
-            # Si no hay outcome YES, usar el primer token
-            if tokens:
-                yes_price = Decimal(str(tokens[0].get("price", 0)))
+        if yes_price <= 0 and tokens:
+            yes_price = Decimal(str(tokens[0].get("price", 0)))
 
-        close_ts = map_data.get("market_close_ts")
-        if not close_ts:
-            now_ts = int(time.time())
-            close_ts = (now_ts // 300) * 300 + 300
-            
-        strike = map_data.get("strike_price", 0.0)
+        close_ts = map_data.get("market_close_ts", int(time.time()) + 300)
+        strike_val = map_data.get("strike_price", 0.0)
 
         tick = PolymarketTick(
             asset=asset,
             market_id=map_data["market_id"],
             condition_id=map_data["condition_id"],
             yes_price=yes_price,
-            strike_price=strike,
+            strike_price=strike_val,
             market_close_ts=close_ts,
         )
         self._publish(tick)
