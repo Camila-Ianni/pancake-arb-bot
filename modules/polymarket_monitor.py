@@ -238,6 +238,10 @@ class PolymarketMonitor:
             # Ignorar el timestamp de la API ya que devuelve horas genéricas (ej: 00:00 UTC) para eventos dinámicos.
             # Tomar el valor matemático del mapeo que hicimos en REST.
             cached_map = self._market_map.get(asset, {})
+            
+            if strike == 0.0 and "strike_price" in cached_map:
+                strike = cached_map["strike_price"]
+                
             if "market_close_ts" in cached_map:
                 close_ts = cached_map["market_close_ts"]
             else:
@@ -292,6 +296,7 @@ class PolymarketMonitor:
                                     
                                     m_id = str(m.get("id") or m.get("market_id"))
                                     c_id = str(m.get("conditionId") or m.get("condition_id"))
+                                    strike_val = float(m.get("line") or m.get("strike") or 0)
                                     
                                     asset_enum = SniperAsset.BTC if asset_name == "btc" else SniperAsset.ETH
                                     
@@ -300,7 +305,8 @@ class PolymarketMonitor:
                                         new_map[asset_enum] = {
                                             "market_id": m_id,
                                             "condition_id": c_id,
-                                            "market_close_ts": interval + 300
+                                            "market_close_ts": interval + 300,
+                                            "strike_price": strike_val
                                         }
                                         label = "Current" if interval == current_interval else "Next/Pre-cache"
                                         print(f"  ✅ Enlazado {asset_name.upper()} 5m dinámico ({label}). ID: {m_id}")
@@ -356,13 +362,15 @@ class PolymarketMonitor:
         if not close_ts:
             now_ts = int(time.time())
             close_ts = (now_ts // 300) * 300 + 300
+            
+        strike = map_data.get("strike_price", 0.0)
 
         tick = PolymarketTick(
             asset=asset,
             market_id=map_data["market_id"],
             condition_id=map_data["condition_id"],
             yes_price=yes_price,
-            strike_price=0.0,
+            strike_price=strike,
             market_close_ts=close_ts,
         )
         self._publish(tick)
