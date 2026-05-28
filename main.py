@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import aiohttp
@@ -16,7 +17,11 @@ from modules.web3_executor import Web3Executor
 
 
 def clear_console() -> None:
-    os.system("cls" if os.name == "nt" else "clear")
+    if os.name == "nt":
+        os.system("cls")
+    else:
+        sys.stdout.write("\033[H\033[2J")
+        sys.stdout.flush()
 
 
 def ask_initial_capital() -> Decimal:

@@ -87,6 +87,8 @@ class CryptoFeed:
                 event_time_ms=int(data.get("E", 0)),
                 received_ns=time.time_ns(),
             )
+            self.metrics.ticks += 1
+            self.shared_state.last_binance_update_ns = time.time_ns()
             self.metrics.record_parse_ms((time.perf_counter_ns() - parse_start) / 1_000_000)
             self._publish(tick)
 

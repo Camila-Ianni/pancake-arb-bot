@@ -32,27 +32,36 @@ func NewBinanceFeed(logger *zap.Logger) *BinanceFeed {
 func (b *BinanceFeed) Start(ctx context.Context, hub *models.SharedMemoryHub) {
 	b.logger.Info("binance_ws: conectando al streaming de producción...")
 	
-	url := "wss://stream.binance.com:9443/stream?streams=btcusdt@ticker/ethusdt@ticker/solusdt@ticker/bnbusdt@ticker/dogeusdt@ticker/maticusdt@ticker"
+	url := "wss://stream.binance.com:9443/stream?streams=btcusdt@miniTicker/ethusdt@miniTicker/solusdt@miniTicker/bnbusdt@miniTicker/dogeusdt@miniTicker/maticusdt@miniTicker"
 	
-	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
-	conn, _, err := dialer.DialContext(ctx, url, nil)
-	if err != nil {
-		b.logger.Error("binance_ws: error crítico de handshake", zap.Error(err))
-		return
-	}
-	defer conn.Close()
-
-	b.logger.Info("binance_ws: ¡CONECTADO! Extrayendo ticks reales...")
-
 	for {
-		select {
-		case <-ctx.Done():
+		// Chequear si el contexto fue cancelado antes de intentar conectar
+		if ctx.Err() != nil {
 			return
-		default:
+		}
+
+		dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
+		conn, _, err := dialer.DialContext(ctx, url, nil)
+		if err != nil {
+			b.logger.Error("binance_ws: error crítico de handshake", zap.Error(err))
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		b.logger.Info("binance_ws: ¡CONECTADO! Extrayendo ticks reales...")
+
+		// Bucle interno de lectura
+		for {
+			if ctx.Err() != nil {
+				conn.Close()
+				return
+			}
+
 			_, message, err := conn.ReadMessage()
 			if err != nil {
-				time.Sleep(1 * time.Second)
-				continue
+				// Cierra el socket roto y rompe el bucle interno para que el for externo reconecte
+				conn.Close()
+				break
 			}
 
 			var combined binanceCombinedStream
