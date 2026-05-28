@@ -357,9 +357,19 @@ class PolymarketMonitor:
 
         if not self._market_map:
             return
+
+        now_sec = int(time.time())
+        expired = [a for a, d in self._market_map.items() if now_sec > d.get("market_close_ts", 0) + 2]
+        for a in expired:
+            self._market_map.pop(a, None)
+            self.shared_state.polymarket_books.pop(a, None)
+
+        if not self._market_map:
+            return
+
         try:
             async with aiohttp.ClientSession() as session:
-                for asset, data in self._market_map.items():
+                for asset, data in list(self._market_map.items()):
                     condition_id = data["condition_id"]
                     url = f"{POLYMARKET_REST}/markets/{condition_id}"
                     try:
@@ -375,6 +385,11 @@ class PolymarketMonitor:
 
     def _process_rest_market(self, asset: SniperAsset, map_data: Dict[str, str], market_data: dict) -> None:
         """Procesa datos de un mercado desde la REST API utilizando el caché purificado."""
+        if int(time.time()) > map_data.get("market_close_ts", 0) + 2:
+            self._market_map.pop(asset, None)
+            self.shared_state.polymarket_books.pop(asset, None)
+            return
+
         tokens = market_data.get("tokens", [])
         yes_price = Decimal("0")
         for token in tokens:

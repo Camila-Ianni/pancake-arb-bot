@@ -74,12 +74,13 @@ class ArbitrageEngine:
             self.shared_state.log_messages.append(f"❌ [{asset.name}] Error calculando remaining: {e} | Book: {book}")
             return False
 
-        if remaining % 10 == 0 or remaining <= 20:
-            self.shared_state.log_messages.append(f"🔍 [CHECK {asset.name}] Tick recibido. Remaining: {remaining}s")
-
         if remaining <= 0:
+            self.shared_state.log_messages.append(f"⏳ [{asset.name}] Vela cerrada. Esperando que Polymarket publique la nueva ronda...")
             self._fired_window[asset] = False
             return False
+
+        if remaining % 10 == 0 or remaining <= 20:
+            self.shared_state.log_messages.append(f"🔍 [CHECK {asset.name}] Tick recibido. Remaining: {remaining}s")
             
         self.runtime_cfg.close_window_sec = 20  # Ventana óptima HFT antes del cierre
         
