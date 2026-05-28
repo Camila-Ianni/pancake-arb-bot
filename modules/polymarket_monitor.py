@@ -90,13 +90,17 @@ class PolymarketMonitor:
         }
         async with aiohttp.ClientSession() as session:
             for asset, slug in assets_to_check.items():
-                url = f"https://gamma-api.polymarket.com/markets/slug/{slug}"
+                url = f"https://gamma-api.polymarket.com/events/slug/{slug}"
                 try:
                     async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                         if resp.status == 200:
                             data = await resp.json()
-                            m_id = data.get("id") or data.get("market_id")
-                            c_id = data.get("conditionId") or data.get("condition_id")
+                            markets_list = data.get("markets", [])
+                            if not markets_list:
+                                continue
+                            m = markets_list[0]
+                            m_id = m.get("id") or m.get("market_id")
+                            c_id = m.get("conditionId") or m.get("condition_id")
                             if m_id and c_id:
                                 self._market_map[asset] = {"market_id": str(m_id), "condition_id": str(c_id)}
                                 # Resubscribe al WS
@@ -256,30 +260,42 @@ class PolymarketMonitor:
 
     async def _rest_poll_once(self) -> None:
         """Consulta REST API y auto-actualiza mercados de 5m basándose en el reloj del sistema."""
-        import urllib.request
-        
         now = int(time.time())
         current_interval = (now // 300) * 300
+        intervals_to_check = [current_interval, current_interval + 300]
         
         if not hasattr(self, "_last_interval") or self._last_interval != current_interval:
-            print(f"\n🔄 [MONITOR] Nueva vela HFT detectada ({current_interval}). Resolviendo IDs dinámicamente...")
+            print(f"\n🔄 [MONITOR] Resolviendo IDs dinámicamente para intervalos HFT...")
             new_map = {}
             async with aiohttp.ClientSession() as session:
                 for asset_name in ["btc", "eth"]:
-                    slug = f"{asset_name}-updown-5m-{current_interval}"
-                    url = f"https://gamma-api.polymarket.com/markets/slug/{slug}"
-                    try:
-                        async with session.get(url, timeout=3) as resp:
-                            if resp.status == 200:
-                                d = await resp.json()
-                                asset_enum = SniperAsset.BTC if asset_name == "btc" else SniperAsset.ETH
-                                new_map[asset_enum] = {
-                                    "market_id": str(d.get("id") or d.get("market_id")),
-                                    "condition_id": str(d.get("condition_id"))
-                                }
-                                print(f"  ✅ Enlazado {asset_name.upper()} 5m dinámico. ID: {d.get('id')}")
-                    except Exception:
-                        pass
+                    for interval in intervals_to_check:
+                        slug = f"{asset_name}-updown-5m-{interval}"
+                        url = f"https://gamma-api.polymarket.com/events/slug/{slug}"
+                        try:
+                            async with session.get(url, timeout=3) as resp:
+                                if resp.status == 200:
+                                    d = await resp.json()
+                                    markets_list = d.get("markets", [])
+                                    if not markets_list:
+                                        continue
+                                    m = markets_list[0]
+                                    
+                                    m_id = str(m.get("id") or m.get("market_id"))
+                                    c_id = str(m.get("conditionId") or m.get("condition_id"))
+                                    
+                                    asset_enum = SniperAsset.BTC if asset_name == "btc" else SniperAsset.ETH
+                                    
+                                    # Solo sobrescribimos si es el current_interval, para no pisar un activo con un futuro si ya tenemos el de ahora
+                                    if asset_enum not in new_map or interval == current_interval:
+                                        new_map[asset_enum] = {
+                                            "market_id": m_id,
+                                            "condition_id": c_id
+                                        }
+                                        label = "Current" if interval == current_interval else "Next/Pre-cache"
+                                        print(f"  ✅ Enlazado {asset_name.upper()} 5m dinámico ({label}). ID: {m_id}")
+                        except Exception:
+                            pass
             if new_map:
                 self._market_map.update(new_map)
                 self._last_interval = current_interval
