@@ -83,8 +83,11 @@ class Web3Executor:
                     self.metrics.record_sign_ms(sign_ms)
 
                     invested = req.signal.bet_size_usd
+                    # FAKE PAYOUT
                     payout = invested * Decimal("1.50")
                     pnl = payout - invested
+                    
+                    self.shared_state.log_messages.append(f"⚠️ [WEB3 EXECUTOR] Ejecutado en modo VIRTUAL. TX: {tx_hash[:10]}... (¡No se ha tocado Metamask/Polygon!)")
                     result = ExecutionResult(
                         tx_hash=tx_hash,
                         ok=True,

@@ -108,30 +108,8 @@ async def result_loop(engine: ArbitrageEngine, result_queue: "asyncio.Queue[Exec
 
 
 async def simulated_market_activity(result_queue: asyncio.Queue[ExecutionResult], shared: SharedMarketState) -> None:
-    """Inyector de historial falso para testear el panel de forma visual (Dry Run)."""
-    while not shared.kill_switch:
-        await asyncio.sleep(random.uniform(15, 30))
-        is_dry_run = os.getenv("DRY_RUN", "false").lower() in ("true", "1", "yes")
-        if is_dry_run and len(shared.polymarket_books) > 0:
-            asset = random.choice(list(shared.polymarket_books.keys()))
-            invested = Decimal("10.00")
-            win = random.choice([True, False])
-            payout = invested * Decimal("1.50") if win else Decimal("0")
-            pnl = payout - invested - Decimal("0.05") # Simulación de pérdida/ganancia neta con gas
-            
-            # Simulamos el estado Inflight para el panel visual
-            shared.inflight_assets.add(asset)
-            await asyncio.sleep(1.0)
-            
-            result = ExecutionResult(
-                tx_hash="0xVIRTUAL" + str(time.time_ns())[-8:],
-                ok=True,
-                asset=asset,
-                invested_usd=invested,
-                payout_usd=payout,
-                pnl_delta_usd=pnl,
-            )
-            await result_queue.put(result)
+    """Función de simulación desactivada para evitar inyectar PnL falso."""
+    pass
 
 
 async def _check_polygon_rpc(session: aiohttp.ClientSession, rpc_url: str) -> bool:
