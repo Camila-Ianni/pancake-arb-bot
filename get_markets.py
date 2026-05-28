@@ -1,70 +1,83 @@
 import urllib.request
+import urllib.error
 import json
+import time
 import os
 
-print("🔄 Conectando con la API Gamma de Polymarket para buscar mercados activos de precios...")
-url = "https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&q=price"
+print("🔄 Calculando intervalos determinísticos de 5 minutos...")
+now = int(time.time())
+current_interval = (now // 300) * 300
+intervals_to_check = [current_interval - 300, current_interval, current_interval + 300]
 
-try:
+found = {"BTC": None, "ETH": None, "SOL": None, "BNB": None}
+
+def fetch_market_by_slug(slug: str):
+    url = f"https://gamma-api.polymarket.com/markets/slug/{slug}"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req) as response:
-        markets = json.loads(response.read().decode())
-        
-    found = {"BTC": None, "ETH": None, "SOL": None, "BNB": None}
-    
-    for m in markets:
-        if not isinstance(m, dict):
-            continue
-            
-        question = str(m.get("question", "")).lower()
-        slug = str(m.get("slug", "")).lower()
-        title = str(m.get("title", "")).lower()
-        
-        market_id = m.get("id") or m.get("market_id")
-        condition_id = m.get("conditionId") or m.get("condition_id")
-        
-        if not market_id or not condition_id:
-            continue
-            
-        combined_text = question + " " + slug + " " + title
-        
-        if not found["BTC"] and ("bitcoin" in combined_text or "btc" in combined_text):
-            found["BTC"] = f"BTC:{market_id}:{condition_id}"
-        elif not found["ETH"] and ("ethereum" in combined_text or "eth" in combined_text):
-            found["ETH"] = f"ETH:{market_id}:{condition_id}"
-        elif not found["SOL"] and ("solana" in combined_text or "sol" in combined_text):
-            found["SOL"] = f"SOL:{market_id}:{condition_id}"
-        elif not found["BNB"] and ("binance" in combined_text or "bnb" in combined_text):
-            found["BNB"] = f"BNB:{market_id}:{condition_id}"
+    try:
+        with urllib.request.urlopen(req) as response:
+            return json.loads(response.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        print(f"⚠️ Error HTTP {e.code} al consultar {slug}")
+        return None
+    except Exception as e:
+        print(f"❌ Error al consultar {slug}: {e}")
+        return None
 
-    final_parts = []
-    print("\n🚀 ¡Mercados encontrados y extraídos!\n")
-    for asset, formatted in found.items():
-        if formatted:
-            print(f"✅ {asset} encontrado -> {formatted}")
-            final_parts.append(formatted)
-        else:
-            print(f"⚠️ {asset} no encontrado en este lote. Usando fallback estático.")
-            dummy = f"0x{'0'*61}{asset.lower()}"
-            final_parts.append(f"{asset}:{dummy}:{dummy}")
-            
-    final_string = ",".join(final_parts)
-    print(f"\n⚙️ Cadena generada para el .env:\nPOLYMARKET_MARKETS={final_string}\n")
+for interval in intervals_to_check:
+    print(f"🔎 Escaneando intervalo Epoch: {interval}")
     
-    env_path = ".env"
-    if os.path.exists(env_path):
-        with open(env_path, "r") as f:
-            lines = f.readlines()
-            
-        with open(env_path, "w") as f:
-            for line in lines:
-                if line.startswith("POLYMARKET_MARKETS="):
-                    f.write(f"POLYMARKET_MARKETS={final_string}\n")
-                else:
-                    f.write(line)
-        print("✅ ¡Archivo .env parcheado automáticamente de forma exitosa!")
+    # Check BTC
+    if not found["BTC"]:
+        slug_btc = f"btc-updown-5m-{interval}"
+        data_btc = fetch_market_by_slug(slug_btc)
+        if data_btc:
+            m_id = data_btc.get("id") or data_btc.get("market_id")
+            c_id = data_btc.get("conditionId") or data_btc.get("condition_id")
+            if m_id and c_id:
+                found["BTC"] = f"BTC:{m_id}:{c_id}"
+                print(f"  ✅ BTC encontrado en intervalo {interval}")
+
+    # Check ETH
+    if not found["ETH"]:
+        slug_eth = f"eth-updown-5m-{interval}"
+        data_eth = fetch_market_by_slug(slug_eth)
+        if data_eth:
+            m_id = data_eth.get("id") or data_eth.get("market_id")
+            c_id = data_eth.get("conditionId") or data_eth.get("condition_id")
+            if m_id and c_id:
+                found["ETH"] = f"ETH:{m_id}:{c_id}"
+                print(f"  ✅ ETH encontrado en intervalo {interval}")
+
+final_parts = []
+print("\n🚀 Resultados de la extracción determinística:\n")
+for asset in ["BTC", "ETH", "SOL", "BNB"]:
+    formatted = found[asset]
+    if formatted:
+        print(f"✅ {asset} 5m ID -> {formatted}")
+        final_parts.append(formatted)
     else:
-        print("❌ Archivo .env no encontrado en la ruta local.")
+        print(f"⚠️ {asset} 5m no activo/encontrado. Usando fallback estructurado.")
+        dummy_market = f"0x{asset.lower()}5mfallbackmarketid0000000"
+        dummy_cond = f"0x{asset.lower()}5mfallbackconditionid00000"
+        final_parts.append(f"{asset}:{dummy_market}:{dummy_cond}")
         
-except Exception as e:
-    print(f"❌ Ocurrió un problema al escanear Gamma API: {e}")
+final_string = ",".join(final_parts)
+print(f"\n⚙️ Cadena generada para el .env:\nPOLYMARKET_MARKETS={final_string}\n")
+
+env_path = ".env"
+if os.path.exists(env_path):
+    with open(env_path, "r") as f:
+        lines = f.readlines()
+        
+    with open(env_path, "w") as f:
+        for line in lines:
+            if line.startswith("POLYMARKET_MARKETS="):
+                f.write(f"POLYMARKET_MARKETS={final_string}\n")
+            else:
+                f.write(line)
+    print("✅ ¡Archivo .env parcheado automáticamente de forma exitosa!")
+else:
+    print("❌ Archivo .env no encontrado en la ruta local.")
