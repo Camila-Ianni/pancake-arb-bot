@@ -109,48 +109,41 @@ class ArbitrageEngine:
                 self.shared_state.log_messages.append(f"⏳ [{asset.name}] Monitoreando vela de 5m... Quedan {remaining}s. Spot: {mark_price:.2f}")
             return False
 
-        self.shared_state.log_messages.append(f"🎯 [ALERTA SNIPER] ¡{asset.name} en ventana crítica de ejecución! Faltan {remaining}s. Spot: {mark_price} | Strike: {strike} | YES: {yes_price}")
+        self.shared_state.log_messages.append(f"🎯 [ALERTA SNIPER] ¡{asset.name} en ventana crítica de ejecución! Faltan {remaining}s. Spot: {mark_price:.2f} | Strike: {strike:.2f}")
 
-        # --- LOG DETALLADO DE ARBITRAJE SIMULADO ---
+        # --- DETERMINAR LADO GANADOR ---
         is_dry_run = os.getenv("DRY_RUN", "false").lower() in ("true", "1", "yes")
-        gross_spread = ((mark_price - strike) / strike * 100) if strike > 0 else 0
-        
-        decision = "Ejecutaría compra"
-        if mark_price <= strike:
-            decision = "Saltando trade: El precio ya es eficiente"
-            if remaining < 60:
-                self.shared_state.log_messages.append(f"[{asset.name} 5m] Descartado por precio eficiente. Spread: {gross_spread:.4f}% | Spot: {mark_price} | Strike: {strike}")
-        elif yes_price >= self.runtime_cfg.yes_price_max:
-            decision = "Saltando trade: Precio YES muy alto"
-            if remaining < 60:
-                self.shared_state.log_messages.append(f"[{asset.name} 5m] Descartado: YES ({yes_price}) > Max ({self.runtime_cfg.yes_price_max}). Spread: {gross_spread:.4f}%")
+        if mark_price > strike:
+            side = OrderSide.YES
+            side_str = "YES"
+            poly_price = yes_price
+        else:
+            side = OrderSide.NO
+            side_str = "NO"
+            poly_price = Decimal("1.00") - yes_price
+
+        decision = f"Ejecutando apuesta ganadora ({side_str})"
             
         bet_size = self._compute_dynamic_stake()
-        if decision == "Ejecutaría compra" and bet_size < Decimal("0.01"):
+        if bet_size < Decimal("0.01"):
             decision = "Saltando trade: Liquidez USDC insuficiente (min 0.01)"
-            if remaining < 60:
-                self.shared_state.log_messages.append(f"[{asset.name} 5m] Descartado por saldo insuficiente. Spread: {gross_spread:.4f}% | Saldo: {self.shared_state.wallet_usdc_balance}")
-
-        if remaining < 60:
-            self.shared_state.log_messages.append(f"[{asset.name} 5m] -> Segundos restantes: {remaining} | Precio Binance: {mark_price:.2f} | Strike Polymarket: {strike:.2f} | Margen detectado: {gross_spread:.4f}%")
-            if decision != "Ejecutaría compra":
-                self.shared_state.log_messages.append(f"  └ {decision}")
-
-        if is_dry_run and remaining < 60:
-            simulated_gas = Decimal("0.05")
-            pnl_proj = Decimal("2.50") - simulated_gas if decision == "Ejecutaría compra" else Decimal("0")
-            self.shared_state.log_messages.append(f"  ├ [SIMULACIÓN OP] PnL Proyectado Neto: ${pnl_proj:.2f} (Gas deducido)")
-
-        if decision != "Ejecutaría compra":
-            if "USDC" in decision:
-                self.shared_state.latest_status = "INSUFFICIENT_USDC"
+            self.shared_state.log_messages.append(f"[{asset.name} 5m] Descartado por saldo insuficiente. Saldo: {self.shared_state.wallet_usdc_balance}")
+            self.shared_state.latest_status = "INSUFFICIENT_USDC"
             return False
+
+        self.shared_state.log_messages.append(f"[{asset.name} 5m] -> Segundos restantes: {remaining} | Binance: {mark_price:.2f} | Strike: {strike:.2f}")
+        self.shared_state.log_messages.append(f"  └ {decision}")
+
+        if is_dry_run:
+            simulated_gas = Decimal("0.05")
+            pnl_proj = Decimal("2.50") - simulated_gas
+            self.shared_state.log_messages.append(f"  ├ [SIMULACIÓN OP] PnL Proyectado Neto: ${pnl_proj:.2f} (Gas deducido)")
 
         signal = SniperSignal(
             asset=asset,
             market_id=str(book["market_id"]),
             condition_id=str(book["condition_id"]),
-            yes_price=yes_price,
+            yes_price=poly_price,
             strike_price=strike,
             mark_price=mark_price,
             bet_size_usd=bet_size,
@@ -159,7 +152,7 @@ class ArbitrageEngine:
         self.shared_state.sniper_state = SniperState.FIRING
         self.shared_state.latest_status = "TRIGGER_FIRED_MULTI_ASSET"
         self.shared_state.inflight_assets.add(asset)
-        await self.execution_queue.put(ExecutionRequest(signal=signal, side=OrderSide.YES))
+        await self.execution_queue.put(ExecutionRequest(signal=signal, side=side))
         self.shared_state.last_signal_ns = signal.signal_ns
         self._fired_window[asset] = True
         return True
