@@ -5,11 +5,11 @@ const { ethers } = require('ethers');
 async function execute() {
     const args = process.argv.slice(2);
     if (args.length < 4) {
-        console.error("Usage: node execute_order.js <tokenId> <price> <side> <size>");
+        console.error("Usage: node execute_order.js <conditionId> <price> <side> <size>");
         process.exit(1);
     }
 
-    const [tokenId, price, side, size] = args;
+    const [conditionId, price, targetOutcome, size] = args;
     
     try {
         const privateKey = process.env.PRIVATE_KEY.startsWith('0x') ? process.env.PRIVATE_KEY : '0x' + process.env.PRIVATE_KEY;
@@ -28,16 +28,35 @@ async function execute() {
             creds
         );
 
-        // Crear la orden usando el SDK oficial
+        // 1. Fetch market to get the tokenID for the desired outcome (YES/NO)
+        const marketResp = await fetch(`https://clob.polymarket.com/markets/${conditionId}`);
+        if (!marketResp.ok) {
+            throw new Error(`Failed to fetch market ${conditionId}`);
+        }
+        const marketData = await marketResp.json();
+        
+        let actualTokenId = null;
+        for (const token of marketData.tokens) {
+            if (token.outcome.toUpperCase() === targetOutcome.toUpperCase()) {
+                actualTokenId = token.token_id;
+                break;
+            }
+        }
+        
+        if (!actualTokenId) {
+            throw new Error(`Token ID for outcome ${targetOutcome} not found in market ${conditionId}`);
+        }
+
+        // 2. Crear la orden usando el SDK oficial (Siempre compramos el token ganador)
         const order = await client.createOrder({
-            tokenID: tokenId,
+            tokenID: actualTokenId,
             price: parseFloat(price),
-            side: side === "YES" || side === "BUY" ? "BUY" : "SELL",
+            side: "BUY",
             size: parseFloat(size),
             feeRateBps: 0
         });
 
-        // Enviar la orden
+        // 3. Enviar la orden
         const resp = await client.postOrder(order);
         
         if (resp && resp.orderID) {

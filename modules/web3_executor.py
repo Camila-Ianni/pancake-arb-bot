@@ -121,14 +121,14 @@ class Web3Executor:
         # Calcular precio y tamaño
         price = req.signal.yes_price if req.side == OrderSide.YES else (Decimal("1.00") - req.signal.yes_price)
         size = req.signal.bet_size_usd
-        token_id = req.signal.market_id
-        side_str = "BUY"
+        condition_id = req.signal.condition_id
+        side_str = req.side.value  # "YES" or "NO"
         
         script_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "execute_order.js")
         
         # Ejecutar de forma no bloqueante
         proc = await asyncio.create_subprocess_exec(
-            "node", script_path, str(token_id), str(price), side_str, str(size),
+            "node", script_path, str(condition_id), str(price), side_str, str(size),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
