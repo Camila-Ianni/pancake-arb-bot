@@ -54,12 +54,14 @@ async function execute() {
         }
 
         // 2. Crear la orden usando el SDK oficial (Siempre compramos el token ganador)
+        const feeRateBps = marketData.taker_base_fee || marketData.maker_base_fee || 1000;
+        
         const order = await client.createOrder({
             tokenID: actualTokenId,
             price: parseFloat(price),
             side: "BUY",
             size: parseFloat(size),
-            feeRateBps: 0
+            feeRateBps: feeRateBps
         });
 
         // 3. Enviar la orden
