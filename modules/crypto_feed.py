@@ -46,8 +46,8 @@ class CryptoFeed:
 
     async def start(self) -> None:
         self._running = True
-        # Obtener precios iniciales via REST para no empezar en 0
-        await self._seed_prices_rest()
+        # Obtener precios iniciales via REST en background para no bloquear el arranque
+        asyncio.create_task(self._seed_prices_rest())
         import websockets
         while self._running:
             try:
