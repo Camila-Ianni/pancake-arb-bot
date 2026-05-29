@@ -21,12 +21,15 @@ async function execute() {
             passphrase: process.env.POLYMARKET_PASSPHRASE
         };
 
-        // 1. Inicializar cliente con objeto de configuración (v2)
+        // 1. Inicializar cliente con objeto de configuración (v2) y Proxy Wallet
+        const proxyAddress = process.env.SAFE_WALLET_ADDRESS || process.env.RELAYER_API_KEY_ADDRESS;
         const client = new ClobClient({
             host: "https://clob.polymarket.com",
             chain: 137,
             signer: wallet,
-            creds: creds
+            creds: creds,
+            funderAddress: proxyAddress,
+            signatureType: 2 // 2 = POLY_GNOSIS_SAFE (Deposit wallet de Polymarket)
         });
 
         // 1. Fetch market to get the tokenID for the desired outcome (YES/NO)
