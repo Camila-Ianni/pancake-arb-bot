@@ -177,6 +177,7 @@ class ArbitrageEngine:
         self.shared_state.cumulative_pnl_usd += pnl_delta
         self.shared_state.wallet_usdc_balance += pnl_delta
         self.shared_state.inflight_assets.discard(asset)
+        self._fired_window[asset] = False
         if self.shared_state.cumulative_pnl_usd <= self.runtime_cfg.kill_switch_pnl_usd:
             self.shared_state.kill_switch = True
             self.shared_state.latest_status = "KILL_SWITCH_TRIGGERED"
