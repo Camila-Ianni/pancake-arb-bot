@@ -23,6 +23,14 @@ class ExecutorMetrics:
         if len(self.latency_history_ms) > 100:
             self.latency_history_ms.pop(0)
 
+def _sync_setup_web3(rpc_url):
+    w3 = Web3(Web3.HTTPProvider(rpc_url))
+    contract = w3.eth.contract(
+        address=Web3.to_checksum_address(PANCAKESWAP_CONTRACT),
+        abi=PANCAKESWAP_PREDICTION_ABI
+    )
+    return w3, contract
+
 class Web3Executor:
     """
     Motor EVM para firmar y transmitir transacciones a BNB Chain (PancakeSwap).
@@ -46,11 +54,8 @@ class Web3Executor:
         self.rpc_url = os.getenv("BSC_RPC_URL", "https://bsc-dataseed.binance.org/")
         self.bet_amount_bnb = Decimal(os.getenv("BET_AMOUNT_BNB", "0.0005"))
         
-        self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
-        self.contract = self.w3.eth.contract(
-            address=Web3.to_checksum_address(PANCAKESWAP_CONTRACT),
-            abi=PANCAKESWAP_PREDICTION_ABI
-        )
+        self.w3 = None
+        self.contract = None
         
         if not self.private_key or not self.wallet_address:
             self.shared_state.log_messages.append("⚠️ [ERROR CRÍTICO] PRIVATE_KEY o WALLET_ADDRESS no configurados.")
@@ -58,13 +63,23 @@ class Web3Executor:
         self._workers = []
 
     async def start(self) -> None:
-        self._running = True
-        worker_count = max(1, self.runtime_cfg.max_parallel_signals)
-        self._workers = [
-            asyncio.create_task(self._worker(), name=f"Web3Worker-{i}")
-            for i in range(worker_count)
-        ]
-        await asyncio.gather(*self._workers)
+        try:
+            loop = asyncio.get_event_loop()
+            self.w3, self.contract = await loop.run_in_executor(None, _sync_setup_web3, self.rpc_url)
+            
+            self._running = True
+            worker_count = max(1, self.runtime_cfg.max_parallel_signals)
+            self._workers = [
+                asyncio.create_task(self._worker(), name=f"Web3Worker-{i}")
+                for i in range(worker_count)
+            ]
+            await asyncio.gather(*self._workers)
+        except Exception as e:
+            import traceback
+            err_msg = f"⚠️ [WEB3] START FATAL CRASH: {e} | {traceback.format_exc()}"
+            self.shared_state.log_messages.append(err_msg)
+            with open("crash_report.log", "a") as f:
+                f.write(err_msg + "\n")
 
     async def _worker(self) -> None:
         while self._running:
