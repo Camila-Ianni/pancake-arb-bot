@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { ClobClient } = require('@polymarket/clob-client');
+const { ClobClient } = require('@polymarket/clob-client-v2');
 const { ethers } = require('ethers');
 
 async function execute() {
