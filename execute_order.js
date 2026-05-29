@@ -68,11 +68,13 @@ async function execute() {
             price: parseFloat(price),
             side: "BUY",
             size: parseFloat(size),
-            feeRateBps: feeRateBps,
-            signer: eoaAddress
+            feeRateBps: feeRateBps
         });
 
         // 3. Enviar la orden
+        // Debug
+        console.log("Final Order to Post:", JSON.stringify(order, null, 2));
+
         const resp = await client.postOrder(order);
         
         if (resp && resp.orderID) {
