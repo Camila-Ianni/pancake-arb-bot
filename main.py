@@ -92,7 +92,7 @@ def render_panel(shared: SharedMarketState, crypto: CryptoFeed = None, engine: A
     # --- LOGS SECTION ---
     print("📝 REGISTRO DE EVENTOS & ALERTAS SNIPER")
     print("-" * 86)
-    for msg in shared.log_messages[-8:]:
+    for msg in list(shared.log_messages)[-8:]:
         print(f" {msg}")
     print("=" * 86)
 
