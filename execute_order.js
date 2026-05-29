@@ -29,7 +29,7 @@ async function execute() {
             signer: wallet,
             creds: creds,
             funderAddress: proxyAddress,
-            signatureType: 2 // 2 = POLY_GNOSIS_SAFE (Deposit wallet de Polymarket)
+            signatureType: 3 // 3 = POLY_1271 (Smart Contract Wallet / Deposit Wallet V2)
         });
 
         // 1. Fetch market to get the tokenID for the desired outcome (YES/NO)
