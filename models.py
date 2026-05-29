@@ -35,7 +35,7 @@ class SharedMarketState:
         "sniper_state",
         "asset_prices",
         "last_binance_update_ns",
-        "polymarket_books",
+        "pancake_state",
         "last_signal_ns",
         "kill_switch",
         "latest_status",
@@ -56,7 +56,15 @@ class SharedMarketState:
             SniperAsset.BNB: 0.0,
         }
         self.last_binance_update_ns = 0
-        self.polymarket_books = {}
+        self.pancake_state = {
+            "epoch": 0,
+            "lock_timestamp": 0,
+            "remaining_seconds": 0,
+            "bull_amount": Decimal("0"),
+            "bear_amount": Decimal("0"),
+            "bull_multiplier": Decimal("0"),
+            "bear_multiplier": Decimal("0")
+        }
         self.last_signal_ns = 0
         self.kill_switch = False
         self.latest_status = "BOOTING"

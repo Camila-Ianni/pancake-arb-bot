@@ -7,6 +7,7 @@ import os
 import sys
 import time
 import random
+import signal
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import aiohttp
@@ -14,10 +15,12 @@ import aiohttp
 # Agregamos el directorio actual al PYTHONPATH para evitar errores visuales (unresolved imports) en el IDE (Pylance/VSCode)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from dotenv import load_dotenv
+from config import get_runtime_config
 from models import ExecutionRequest, ExecutionResult, RuntimeConfig, SharedMarketState, SniperAsset, SniperState
 from modules.arbitrage_engine import ArbitrageEngine
 from modules.crypto_feed import CryptoFeed
-from modules.polymarket_monitor import PolymarketMonitor
+from modules.pancakeswap_monitor import PancakeSwapMonitor
 from modules.web3_executor import Web3Executor
 
 
@@ -86,12 +89,8 @@ def render_panel(shared: SharedMarketState, crypto: CryptoFeed = None, engine: A
     # --- LOGS SECTION ---
     print("📝 REGISTRO DE EVENTOS & ALERTAS SNIPER")
     print("-" * 86)
-    # Rellenar con líneas vacías para mantener el alto constante si hay menos de 8 mensajes
-    msgs = list(shared.log_messages)
-    for msg in msgs:
+    for msg in shared.log_messages[-8:]:
         print(f" {msg}")
-    for _ in range(8 - len(msgs)):
-        print("")
     print("=" * 86)
 
 
@@ -138,19 +137,9 @@ async def _check_polymarket_api_key(session: aiohttp.ClientSession, api_key: str
 
 
 async def preflight_connectivity_checks() -> None:
-    rpc_url = os.getenv("RPC_URL", "").strip()
-    polymarket_api_key = os.getenv("POLYMARKET_API_KEY", "").strip()
+    rpc_url = os.getenv("BSC_RPC_URL", "https://bsc-dataseed.binance.org/").strip()
     if not rpc_url:
-        raise RuntimeError("Falta RPC_URL para preflight.")
-    if not polymarket_api_key:
-        raise RuntimeError("Falta POLYMARKET_API_KEY para preflight.")
-    async with aiohttp.ClientSession() as session:
-        rpc_ok = await _check_polygon_rpc(session, rpc_url)
-        key_ok = await _check_polymarket_api_key(session, polymarket_api_key)
-    if not rpc_ok:
-        raise RuntimeError("RPC de Polygon no responde correctamente.")
-    if not key_ok:
-        raise RuntimeError("API Key de Polymarket inválida o no accesible.")
+        raise RuntimeError("Falta BSC_RPC_URL para preflight.")
 
 
 async def run() -> None:
@@ -176,12 +165,11 @@ async def run() -> None:
     result_queue: asyncio.Queue[ExecutionResult] = asyncio.Queue(maxsize=2000)
 
     crypto = CryptoFeed(shared_state=shared)
-    monitor = PolymarketMonitor(shared_state=shared)
+    monitor = PancakeSwapMonitor(shared_state=shared)
     engine = ArbitrageEngine(shared_state=shared, execution_queue=execution_queue, runtime_cfg=runtime_cfg)
     executor = Web3Executor(
         execution_queue=execution_queue,
         result_queue=result_queue,
-        safe_wallet_address=os.getenv("SAFE_WALLET_ADDRESS", "0xSAFE_WALLET"),
         shared_state=shared,
         runtime_cfg=runtime_cfg,
     )
