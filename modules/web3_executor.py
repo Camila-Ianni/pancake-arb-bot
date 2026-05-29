@@ -2,6 +2,7 @@ import asyncio
 import time
 import os
 from decimal import Decimal
+from typing import Optional
 from web3 import AsyncWeb3
 from web3.exceptions import Web3Exception
 
@@ -31,7 +32,7 @@ class Web3Executor:
         execution_queue: "asyncio.Queue[ExecutionRequest]",
         result_queue: "asyncio.Queue[ExecutionResult]",
         shared_state: SharedMarketState,
-        runtime_cfg: RuntimeConfig | None = None
+        runtime_cfg: Optional[RuntimeConfig] = None
     ) -> None:
         self.execution_queue = execution_queue
         self.result_queue = result_queue

@@ -2,6 +2,8 @@ import asyncio
 import time
 from decimal import Decimal
 
+from typing import Optional
+
 from models import SniperAsset, SniperState, ExecutionRequest, ExecutionResult, SniperSignal, OrderSide, SharedMarketState, RuntimeConfig
 
 class ArbitrageEngine:
@@ -9,7 +11,7 @@ class ArbitrageEngine:
         self,
         execution_queue: "asyncio.Queue[ExecutionRequest]",
         shared_state: SharedMarketState,
-        runtime_cfg: RuntimeConfig | None = None
+        runtime_cfg: Optional[RuntimeConfig] = None
     ) -> None:
         self.execution_queue = execution_queue
         self.shared_state = shared_state
