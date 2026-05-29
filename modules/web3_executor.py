@@ -5,8 +5,7 @@ from decimal import Decimal
 from web3 import AsyncWeb3
 from web3.exceptions import Web3Exception
 
-from models import ExecutionRequest, ExecutionResult, OrderSide, SharedMarketState
-from config import RuntimeConfig
+from models import ExecutionRequest, ExecutionResult, OrderSide, SharedMarketState, RuntimeConfig
 from modules.pancake_abi import PANCAKESWAP_PREDICTION_ABI
 
 PANCAKESWAP_CONTRACT = "0x18B2A687610328590Bc8F2e5fEdDe3b582A49cdA"

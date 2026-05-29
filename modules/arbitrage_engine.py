@@ -2,8 +2,7 @@ import asyncio
 import time
 from decimal import Decimal
 
-from models import SniperAsset, SniperState, ExecutionRequest, ExecutionResult, Signal, OrderSide, SharedMarketState
-from config import RuntimeConfig
+from models import SniperAsset, SniperState, ExecutionRequest, ExecutionResult, SniperSignal, OrderSide, SharedMarketState, RuntimeConfig
 
 class ArbitrageEngine:
     def __init__(
@@ -66,7 +65,7 @@ class ArbitrageEngine:
         # Here we just bet Bull to validate execution.
         side = OrderSide.YES  # Bull
         
-        signal = Signal(
+        signal = SniperSignal(
             asset=SniperAsset.BNB,
             market_id=str(epoch),
             condition_id=str(epoch),
