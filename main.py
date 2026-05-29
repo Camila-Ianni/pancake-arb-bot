@@ -50,14 +50,14 @@ def render_panel(shared: SharedMarketState, crypto: CryptoFeed = None, engine: A
     sniper_label = "🟢 ARMADO" if shared.sniper_state != SniperState.STOPPED else "🔴 STOPPED"
     p = shared.asset_prices
     print("=" * 86)
-    print("🎯 POLYMARKET MULTI-ASSET SNIPER (5m CLOSE)")
+    print("🥞 PANCAKESWAP PREDICTION SNIPER (5m)")
     print("=" * 86)
     print(
         f"Capital Inicial: ${shared.initial_capital_usd:.2f} | "
         f"Ganancia Acumulada (PnL): ${shared.cumulative_pnl_usd:+.2f} | "
         f"Estado del Sniper: {sniper_label}"
     )
-    print(f"Wallet USDC: ${shared.wallet_usdc_balance:.2f} | Status: {shared.latest_status}")
+    print(f"Status: {shared.latest_status}")
     print("-" * 86)
     print(
         "Binance Mark | "
@@ -72,14 +72,18 @@ def render_panel(shared: SharedMarketState, crypto: CryptoFeed = None, engine: A
         f"BNB: {'UP' if p[SniperAsset.BNB] > 0 else 'DOWN'}"
     )
     print("-" * 86)
+    
+    ps = shared.pancake_state
+    print(f"🥞 Ronda (Epoch): {ps['epoch']} | Faltan: {ps['remaining_seconds']}s")
+    print(f"Bull Pool: {ps['bull_amount']:.2f} BNB ({ps['bull_multiplier']:.2f}x) | Bear Pool: {ps['bear_amount']:.2f} BNB ({ps['bear_multiplier']:.2f}x)")
+    print("-" * 86)
+    
     if crypto and engine and executor:
         print("⚡ TELEMETRÍA DE LATENCIA (HFT) ⚡")
         print(f"├ Parseo WebSocket (Binance):   {crypto.metrics.avg_parse_ms:.5f} ms")
-        print(f"├ Evaluación Motor Arbitraje:   {engine.metrics.avg_decision_ms:.5f} ms")
-        print(f"└ Ejecución Virtual (Executor): {executor.metrics.avg_sign_ms:.5f} ms")
+        print(f"└ Ejecución Web3 (PancakeSwap): {executor.metrics.avg_sign_ms if hasattr(executor.metrics, 'avg_sign_ms') else 0.0:.5f} ms")
         print("-" * 86)
     print(
-        f"Markets cacheados: {len(shared.polymarket_books)} | "
         f"Inflight: {len(shared.inflight_assets)} | "
         f"Kill Switch: {'ON' if shared.kill_switch else 'OFF'}"
     )

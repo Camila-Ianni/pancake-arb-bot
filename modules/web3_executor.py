@@ -3,7 +3,7 @@ import time
 import os
 from decimal import Decimal
 from typing import Optional
-from web3 import AsyncWeb3
+from web3 import Web3
 from web3.exceptions import Web3Exception
 
 from models import ExecutionRequest, ExecutionResult, OrderSide, SharedMarketState, RuntimeConfig
@@ -46,9 +46,9 @@ class Web3Executor:
         self.rpc_url = os.getenv("BSC_RPC_URL", "https://bsc-dataseed.binance.org/")
         self.bet_amount_bnb = Decimal(os.getenv("BET_AMOUNT_BNB", "0.0005"))
         
-        self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(self.rpc_url))
+        self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
         self.contract = self.w3.eth.contract(
-            address=AsyncWeb3.to_checksum_address(PANCAKESWAP_CONTRACT),
+            address=Web3.to_checksum_address(PANCAKESWAP_CONTRACT),
             abi=PANCAKESWAP_PREDICTION_ABI
         )
         
@@ -114,11 +114,12 @@ class Web3Executor:
 
     async def _execute_live_order(self, req: ExecutionRequest) -> tuple[str, bool, Decimal, Decimal]:
         """
-        Ejecuta la apuesta en PancakeSwap.
+        Ejecuta la apuesta en PancakeSwap usando run_in_executor para no bloquear el HFT loop.
         """
+        loop = asyncio.get_event_loop()
         epoch = self.shared_state.pancake_state["epoch"]
-        value_wei = AsyncWeb3.to_wei(self.bet_amount_bnb, 'ether')
-        account = AsyncWeb3.to_checksum_address(self.wallet_address)
+        value_wei = Web3.to_wei(self.bet_amount_bnb, 'ether')
+        account = Web3.to_checksum_address(self.wallet_address)
         
         # Selección de función
         if req.side == OrderSide.YES:  # Bull
@@ -126,34 +127,37 @@ class Web3Executor:
         else:  # Bear
             func = self.contract.functions.betBear(epoch)
             
-        nonce = await self.w3.eth.get_transaction_count(account)
-        gas_price = await self.w3.eth.gas_price
-        
-        # Aumentar gas price ligeramente para prioridad HFT
-        gas_price = int(gas_price * 1.1)
-        
-        tx = await func.build_transaction({
-            'from': account,
-            'value': value_wei,
-            'nonce': nonce,
-            'gasPrice': gas_price
-        })
-        
-        try:
-            # Estimar gas
-            gas_estimate = await self.w3.eth.estimate_gas(tx)
-            tx['gas'] = gas_estimate
-        except Web3Exception as e:
-            raise Exception(f"Gas estimation failed (ronda cerrada?): {e}")
+        def _build_and_send():
+            nonce = self.w3.eth.get_transaction_count(account)
+            gas_price = self.w3.eth.gas_price
             
-        # Firmar
-        signed_tx = self.w3.eth.account.sign_transaction(tx, private_key=self.private_key)
+            # Aumentar gas price ligeramente para prioridad HFT
+            gas_price = int(gas_price * 1.1)
+            
+            tx = func.build_transaction({
+                'from': account,
+                'value': value_wei,
+                'nonce': nonce,
+                'gasPrice': gas_price
+            })
+            
+            try:
+                # Estimar gas
+                gas_estimate = self.w3.eth.estimate_gas(tx)
+                tx['gas'] = gas_estimate
+            except Web3Exception as e:
+                raise Exception(f"Gas estimation failed (ronda cerrada?): {e}")
+                
+            # Firmar
+            signed_tx = self.w3.eth.account.sign_transaction(tx, private_key=self.private_key)
+            
+            # Enviar
+            tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            return tx_hash.to_0x_hex()
+            
+        tx_hash_hex = await loop.run_in_executor(None, _build_and_send)
         
-        # Enviar
-        tx_hash = await self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-        
-        # No esperamos el receipt para HFT, retornamos inmediatamente asumiendo éxito si pasó al mempool
-        return tx_hash.to_0x_hex(), True, self.bet_amount_bnb, Decimal("0")
+        return tx_hash_hex, True, self.bet_amount_bnb, Decimal("0")
 
     async def stop(self) -> None:
         self._running = False

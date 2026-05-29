@@ -2,7 +2,7 @@ import asyncio
 import time
 import os
 from decimal import Decimal
-from web3 import AsyncWeb3
+from web3 import Web3
 from modules.pancake_abi import PANCAKESWAP_PREDICTION_ABI
 from models import SharedMarketState
 
@@ -12,9 +12,9 @@ class PancakeSwapMonitor:
     def __init__(self, shared_state: SharedMarketState) -> None:
         self.shared_state = shared_state
         self.rpc_url = os.getenv("BSC_RPC_URL", "https://bsc-dataseed.binance.org/")
-        self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(self.rpc_url))
+        self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
         self.contract = self.w3.eth.contract(
-            address=AsyncWeb3.to_checksum_address(PANCAKESWAP_CONTRACT),
+            address=Web3.to_checksum_address(PANCAKESWAP_CONTRACT),
             abi=PANCAKESWAP_PREDICTION_ABI
         )
         self._running = False
@@ -23,14 +23,13 @@ class PancakeSwapMonitor:
         self._running = True
         self.shared_state.log_messages.append(f"🟢 [PANCAKE] Conectando a {self.rpc_url}")
         
+        loop = asyncio.get_event_loop()
+        
         while self._running:
             try:
-                epoch = await self.contract.functions.currentEpoch().call()
-                round_data = await self.contract.functions.rounds(epoch).call()
-                
-                # round_data tuple match con ABI
-                # 0: epoch, 1: start, 2: lock, 3: close, 4: lockPrice, 5: closePrice
-                # 8: totalAmount, 9: bullAmount, 10: bearAmount
+                # Wrap synchronous calls in executor to avoid blocking the event loop
+                epoch = await loop.run_in_executor(None, self.contract.functions.currentEpoch().call)
+                round_data = await loop.run_in_executor(None, self.contract.functions.rounds(epoch).call)
                 
                 lock_timestamp = round_data[2]
                 bull_amount_wei = round_data[9]
@@ -39,7 +38,6 @@ class PancakeSwapMonitor:
                 bull_amt = Decimal(bull_amount_wei) / Decimal(1e18)
                 bear_amt = Decimal(bear_amount_wei) / Decimal(1e18)
                 
-                # Calc multipliers (approx, ignores 3% treasury fee for pure display, or we can include 0.97)
                 total = bull_amt + bear_amt
                 bull_mult = (total * Decimal("0.97")) / bull_amt if bull_amt > 0 else Decimal("0")
                 bear_mult = (total * Decimal("0.97")) / bear_amt if bear_amt > 0 else Decimal("0")
@@ -59,7 +57,6 @@ class PancakeSwapMonitor:
             except Exception as e:
                 self.shared_state.log_messages.append(f"⚠️ [PANCAKE] Error al leer contrato: {e}")
             
-            # Polling rápido pero respetuoso
             await asyncio.sleep(2)
 
     async def stop(self) -> None:
