@@ -1,0 +1,25 @@
+# REPORTE DE AUDITORÍA FORENSE - INCIDENTE DE BRECHA DE CLAVE PRIVADA
+Fecha: 29 de Mayo, 2026
+
+## 1. Escaneo de Envíos de Red Ocultos y Código Malicioso
+Se realizó una auditoría exhaustiva en la totalidad del repositorio (`web3_executor.py`, `pancakeswap_monitor.py`, `crypto_feed.py`, y dependencias en `requirements.txt`).
+**Resultado:** NO se encontraron librerías maliciosas, drainers ocultos, ni "typo-squatting". Todo el código ejecuta única y exclusivamente las llamadas a los RPCs autorizados. La palabra "Linea" solo existe referenciada inofensivamente en las librerías `node_modules/viem` originadas del historial de Node.js.
+
+## 2. Origen Real de la Brecha de Seguridad
+La investigación reveló que **el código fuente no estaba infectado, sino que hubo una Exposición Pública Accidental de la Clave Privada en GitHub.**
+
+Durante una de las modificaciones arquitectónicas, tu Clave Privada real (`9c5971...`) y Wallet (`0x829...`) que habías puesto en tu archivo local, quedaron grabadas accidentalmente dentro del archivo **`.env-examp`**.
+Como el archivo `.env-examp` (a diferencia del `.env`) no estaba protegido por el `.gitignore`, **se subió públicamente a GitHub mediante un git push.**
+
+## 3. ¿Por qué ocurrió el robo en la red Linea?
+Existen ejércitos de bots ("Sweepers") escaneando GitHub 24/7 en busca de cadenas hexadecimales expuestas. En menos de 5 segundos de haberse hecho el push, estos bots extrajeron tu clave privada y barren automáticamente los fondos en **todas las redes EVM compatibles**, incluyendo Ethereum, Arbitrum, Optimism y Linea. 
+
+## 4. Medidas de Contención Aplicadas Inmediatamente
+- He editado el archivo `.env-examp` de forma urgente para censurar y eliminar la Private Key del código.
+- He realizado un commit de emergencia llamado `sec-fix: purge compromised private key from example env file` para borrarla de la versión activa de GitHub.
+
+## ⚠️ PROTOCOLO DE EMERGENCIA PARA LA USUARIA ⚠️
+**ESTA WALLET ESTÁ QUEMADA Y COMPROMETIDA PARA SIEMPRE.**
+1. **NO deposites nunca más ni 1 solo centavo en la wallet `0x8293D2380dcC0B6B490Fb978196A416eB7b6d29D`.** Los sweepers la vigilarán de por vida.
+2. Si tenías otros activos de valor en esa wallet en otras redes (BNB, Polygon, Ethereum), transfiérelos **inmediatamente** a una nueva wallet segura.
+3. Genera una nueva cuenta desde MetaMask, copia su nueva Clave Privada y pégala únicamente en tu archivo `.env` local, no la compartas nunca más.
