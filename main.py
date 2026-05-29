@@ -16,7 +16,6 @@ import aiohttp
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dotenv import load_dotenv
-from config import get_runtime_config
 from models import ExecutionRequest, ExecutionResult, RuntimeConfig, SharedMarketState, SniperAsset, SniperState
 from modules.arbitrage_engine import ArbitrageEngine
 from modules.crypto_feed import CryptoFeed
