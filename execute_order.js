@@ -21,12 +21,13 @@ async function execute() {
             passphrase: process.env.POLYMARKET_PASSPHRASE
         };
 
-        const client = new ClobClient(
-            "https://clob.polymarket.com",
-            137,
-            wallet,
-            creds
-        );
+        // 1. Inicializar cliente con objeto de configuración (v2)
+        const client = new ClobClient({
+            host: "https://clob.polymarket.com",
+            chain: 137,
+            signer: wallet,
+            creds: creds
+        });
 
         // 1. Fetch market to get the tokenID for the desired outcome (YES/NO)
         const marketResp = await fetch(`https://clob.polymarket.com/markets/${conditionId}`);

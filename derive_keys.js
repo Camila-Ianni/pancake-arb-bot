@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { ClobClient } = require('@polymarket/clob-client');
+const { ClobClient } = require('@polymarket/clob-client-v2');
 
 async function deriveKeys() {
     const privateKey = process.env.PRIVATE_KEY;
@@ -15,11 +15,11 @@ async function deriveKeys() {
         const wallet = new ethers.Wallet(privateKey.startsWith('0x') ? privateKey : '0x' + privateKey);
 
         // Inicializar cliente con la llave L1 (wallet)
-        const client = new ClobClient(
-            "https://clob.polymarket.com",
-            137,
-            wallet
-        );
+        const client = new ClobClient({
+            host: "https://clob.polymarket.com",
+            chain: 137,
+            signer: wallet
+        });
 
         // Derive L2 API keys
         const creds = await client.deriveApiKey();
