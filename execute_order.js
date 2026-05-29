@@ -35,9 +35,15 @@ async function execute() {
         }
         const marketData = await marketResp.json();
         
+        // Mapear YES -> ['YES', 'UP'] y NO -> ['NO', 'DOWN']
+        const validOutcomes = (targetOutcome === "YES" || targetOutcome === "BUY") 
+            ? ["YES", "UP"] 
+            : ["NO", "DOWN"];
+            
         let actualTokenId = null;
         for (const token of marketData.tokens) {
-            if (token.outcome.toUpperCase() === targetOutcome.toUpperCase()) {
+            const outcomeStr = String(token.outcome).toUpperCase();
+            if (validOutcomes.includes(outcomeStr)) {
                 actualTokenId = token.token_id;
                 break;
             }
