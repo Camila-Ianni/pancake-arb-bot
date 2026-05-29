@@ -24,6 +24,7 @@ async function execute() {
         // 1. Inicializar cliente con objeto de configuración (v2) y Proxy Wallet
         // Usar RELAYER_API_KEY_ADDRESS ya que el usuario confirmó que esa es su Dirección en la UI de Polymarket.
         const proxyAddress = process.env.RELAYER_API_KEY_ADDRESS;
+        const eoaAddress = process.env.WALLET_ADDRESS;
 
         const client = new ClobClient({
             host: "https://clob.polymarket.com",
@@ -31,7 +32,7 @@ async function execute() {
             signer: wallet,
             creds: creds,
             funderAddress: proxyAddress,
-            signatureType: 2 // 2 = POLY_GNOSIS_SAFE (La EOA firma, pero el maker es la Proxy)
+            signatureType: 3 // 3 = POLY_1271 (Smart Contract Wallet / Deposit Wallet V2)
         });
 
         // 1. Fetch market to get the tokenID for the desired outcome (YES/NO)
@@ -67,7 +68,8 @@ async function execute() {
             price: parseFloat(price),
             side: "BUY",
             size: parseFloat(size),
-            feeRateBps: feeRateBps
+            feeRateBps: feeRateBps,
+            signer: eoaAddress
         });
 
         // 3. Enviar la orden
