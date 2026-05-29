@@ -52,12 +52,15 @@ def render_panel(shared: SharedMarketState, crypto: CryptoFeed = None, engine: A
     print("=" * 86)
     print("🥞 PANCAKESWAP PREDICTION SNIPER (5m)")
     print("=" * 86)
+    wallet_raw = os.getenv("WALLET_ADDRESS", "UNKNOWN")
+    wallet_suffix = wallet_raw[-4:] if len(wallet_raw) > 4 else "NONE"
+    
     print(
         f"Capital Inicial: ${shared.initial_capital_usd:.2f} | "
         f"Ganancia Acumulada (PnL): ${shared.cumulative_pnl_usd:+.2f} | "
         f"Estado del Sniper: {sniper_label}"
     )
-    print(f"Status: {shared.latest_status}")
+    print(f"Wallet BNB: ...{wallet_suffix} | Status: {shared.latest_status[:70]}")
     print("-" * 86)
     print(
         "Binance Mark | "

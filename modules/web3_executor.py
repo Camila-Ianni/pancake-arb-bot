@@ -109,9 +109,9 @@ class Web3Executor:
                     pnl_delta_usd=pnl,
                 )
             except Exception as e:
-                import traceback
-                self.shared_state.log_messages.append(f"❌ [WEB3 EXECUTOR] Fallo de Ejecución: {e} | {traceback.format_exc()}")
-                self.shared_state.latest_status = f"ERROR EJECUCIÓN: {e}"
+                err_msg = str(e)[:100]  # Truncate error message
+                self.shared_state.log_messages.append(f"❌ [WEB3] Fallo TX: {err_msg}")
+                self.shared_state.latest_status = f"ERROR EJECUCIÓN: {err_msg}"
                 
                 if req.signal.asset in self.shared_state.inflight_assets:
                     self.shared_state.inflight_assets.remove(req.signal.asset)
@@ -154,15 +154,9 @@ class Web3Executor:
                 'from': account,
                 'value': value_wei,
                 'nonce': nonce,
-                'gasPrice': gas_price
+                'gasPrice': gas_price,
+                'gas': 250000  # Hardcoded gas limit to bypass node estimation on low balance
             })
-            
-            try:
-                # Estimar gas
-                gas_estimate = self.w3.eth.estimate_gas(tx)
-                tx['gas'] = gas_estimate
-            except Web3Exception as e:
-                raise Exception(f"Gas estimation failed (ronda cerrada?): {e}")
                 
             # Firmar
             signed_tx = self.w3.eth.account.sign_transaction(tx, private_key=self.private_key)
