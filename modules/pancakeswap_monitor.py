@@ -55,7 +55,8 @@ class PancakeSwapMonitor:
                 }
                 
             except Exception as e:
-                self.shared_state.log_messages.append(f"⚠️ [PANCAKE] Error al leer contrato: {e}")
+                import traceback
+                self.shared_state.log_messages.append(f"⚠️ [PANCAKE] Loop Crash: {e} | {traceback.format_exc()}")
             
             await asyncio.sleep(2)
 

@@ -62,7 +62,9 @@ class CryptoFeed:
                     await self._loop(ws)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as e:
+                import traceback
+                self.shared_state.log_messages.append(f"⚠️ [BINANCE WS] Crash: {e} | {traceback.format_exc()}")
                 self.metrics.reconnects += 1
                 if self._running:
                     # Intentar REST como fallback antes de reconectar WS
@@ -115,8 +117,9 @@ class CryptoFeed:
                             if price > 0:
                                 self.shared_state.asset_prices[asset] = price
                     self.shared_state.last_binance_update_ns = time.time_ns()
-        except Exception:
-            pass  # Best-effort fallback
+        except Exception as e:
+            import traceback
+            self.shared_state.log_messages.append(f"⚠️ [BINANCE REST] Fallback Crash: {e} | {traceback.format_exc()}")
 
     def _publish(self, tick: BinanceTick) -> None:
         self.shared_state.asset_prices[tick.symbol] = tick.mark_price

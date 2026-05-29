@@ -94,7 +94,8 @@ class Web3Executor:
                     pnl_delta_usd=pnl,
                 )
             except Exception as e:
-                self.shared_state.log_messages.append(f"❌ [WEB3 EXECUTOR] Fallo de Ejecución: {e}")
+                import traceback
+                self.shared_state.log_messages.append(f"❌ [WEB3 EXECUTOR] Fallo de Ejecución: {e} | {traceback.format_exc()}")
                 self.shared_state.latest_status = f"ERROR EJECUCIÓN: {e}"
                 
                 if req.signal.asset in self.shared_state.inflight_assets:
