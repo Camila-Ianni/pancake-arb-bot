@@ -23,10 +23,18 @@ async function execute() {
 
         // 1. Inicializar cliente con objeto de configuración (v2) y Proxy Wallet
         const proxyAddress = process.env.SAFE_WALLET_ADDRESS || process.env.RELAYER_API_KEY_ADDRESS;
+        
+        // Custom signer para engañar al SDK: Retorna la Proxy Wallet como address, pero firma con el EOA.
+        // Esto resuelve el error "the order signer address has to be the address of the API KEY"
+        const customSigner = {
+            getAddress: async () => proxyAddress,
+            _signTypedData: async (domain, types, value) => wallet._signTypedData(domain, types, value)
+        };
+
         const client = new ClobClient({
             host: "https://clob.polymarket.com",
             chain: 137,
-            signer: wallet,
+            signer: customSigner,
             creds: creds,
             funderAddress: proxyAddress,
             signatureType: 3 // 3 = POLY_1271 (Smart Contract Wallet / Deposit Wallet V2)
