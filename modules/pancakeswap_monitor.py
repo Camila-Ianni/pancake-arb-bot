@@ -4,6 +4,7 @@ import os
 import traceback
 import urllib.request
 import email.utils
+import socket
 from decimal import Decimal
 from web3 import Web3
 from modules.pancake_abi import PANCAKESWAP_PREDICTION_ABI
@@ -58,22 +59,24 @@ def _calibrate_time_offset():
     return 0.0
 
 def _sync_setup_pancake(primary_rpc_url):
-    WSS_POOL = [
-        "wss://bsc-rpc.publicnode.com",
-        "wss://entrypoint.blockpi.io/v1/bsc/network",
-        "wss://bsc-mainnet.nodereal.io/ws/v1/public"
+    RPC_POOL = [
+        primary_rpc_url,
+        "https://binance.llamarpc.com",
+        "https://bsc-dataseed1.defibit.io",
+        "https://bsc-dataseed1.ninicoin.io",
+        "https://bsc-mainnet.nodereal.io/v1/public"
     ]
     
     # Eliminar duplicados manteniendo orden
     seen = set()
-    pool = [x for x in WSS_POOL if not (x in seen or seen.add(x))]
+    pool = [x for x in RPC_POOL if not (x in seen or seen.add(x))]
 
     for rpc in pool:
         try:
-            print(f"🌐 [WSS FAILOVER] Intentando conectar a: {rpc}")
-            w3 = Web3(Web3.WebSocketProvider(rpc, websocket_timeout=5))
+            print(f"🌐 [RPC FAILOVER] Intentando conectar a: {rpc}")
+            w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={'timeout': 3}))
             if not w3.is_connected():
-                print(f"🌐 [WSS FAILOVER] {rpc} -> NO CONECTADO. Saltando...")
+                print(f"🌐 [RPC FAILOVER] {rpc} -> NO CONECTADO. Saltando...")
                 continue
             
             try:
@@ -83,18 +86,18 @@ def _sync_setup_pancake(primary_rpc_url):
                 from web3.middleware import geth_poa_middleware
                 w3.middleware_onion.inject(geth_poa_middleware, layer=0)
             
-            print(f"✅ [WSS FAILOVER] Conectado exitosamente a: {rpc}")
+            print(f"✅ [RPC FAILOVER] Conectado exitosamente a: {rpc}")
             contract = w3.eth.contract(
                 address=Web3.to_checksum_address(PANCAKESWAP_CONTRACT),
                 abi=PANCAKESWAP_PREDICTION_ABI
             )
             return w3, contract
         except Exception:
-            print(f"🚨 [WSS FAILOVER] Fallo en {rpc}:")
+            print(f"🚨 [RPC FAILOVER] Fallo en {rpc}:")
             traceback.print_exc()
             continue
             
-    raise Exception("Fallaron todos los WSS del Failover Cluster.")
+    raise Exception("Fallaron todos los RPCs del Failover Cluster.")
 
 def _sync_pancake_call(contract):
     epoch = contract.functions.currentEpoch().call()
@@ -132,9 +135,9 @@ class PancakeSwapMonitor:
             
             # WSS POOL para suscripciones crudas
             wss_pool = [
-                "wss://bsc-rpc.publicnode.com",
-                "wss://entrypoint.blockpi.io/v1/bsc/network",
-                "wss://bsc-mainnet.nodereal.io/ws/v1/public"
+                "wss://bsc.publicnode.com",
+                "wss://rpc.ankr.com/bsc/ws",
+                "wss://bsc-mainnet.public.blastapi.io"
             ]
             current_ws_idx = 0
             
@@ -165,11 +168,8 @@ class PancakeSwapMonitor:
                                 if block_ts_hex:
                                     block_timestamp = int(block_ts_hex, 16)
                                     
-                                    # 2. CALIBRACIÓN AUTOMÁTICA DEL ANCHOR POR BLOQUE
-                                    # Al recibir el bloque, calibramos el offset local usando el timestamp on-chain
-                                    # Esto elimina cualquier jitter derivado del RTT de la red HTTP.
-                                    self.time_offset = block_timestamp - time.time()
-                                    self.shared_state.time_offset = self.time_offset
+                                    # El offset ya fue calibrado de forma atómica al arranque (ej. -0.190s)
+                                    # No se recalcula con el bloque porque el timestamp on-chain arrastra latencia de propagación
                                     
                                     # Consultar contrato al ritmo del bloque (Block-Driven)
                                     epoch, round_data, lock_price_raw = await loop.run_in_executor(
@@ -204,15 +204,11 @@ class PancakeSwapMonitor:
                                         "bear_multiplier": bear_mult
                                     }
                                     
-                except (websockets.exceptions.ConnectionClosed, asyncio.TimeoutError) as e:
-                    print(f"⚠️ [WSS STREAM] Conexión caída en {ws_url} ({type(e).__name__}). Reconectando...")
-                    current_ws_idx = (current_ws_idx + 1) % len(wss_pool)
-                    await asyncio.sleep(1)
-                except Exception as e:
-                    err_msg = f"⚠️ [WSS STREAM] Error crítico: {e}"
-                    self.shared_state.log_messages.append(err_msg)
-                    print(f"🚨 [CRITICAL EXCEPTION DETECTED] WSS Stream Loop")
-                    traceback.print_exc()
+                except (websockets.exceptions.InvalidStatus, websockets.exceptions.ConnectionClosed, socket.gaierror, asyncio.TimeoutError, Exception) as e:
+                    # Silenciador de Tracebacks de red
+                    err_msg = f"⚠️ [WSS FAILOVER] Nodo {ws_url} rechazado o saturado. Rotando cluster de fondo..."
+                    if err_msg not in list(self.shared_state.log_messages)[-1:]:
+                        self.shared_state.log_messages.append(err_msg)
                     current_ws_idx = (current_ws_idx + 1) % len(wss_pool)
                     await asyncio.sleep(1)
         except Exception as e:

@@ -80,7 +80,7 @@ class Web3Executor:
         self.wallet_address = os.getenv("WALLET_ADDRESS")
         self.rpc_url = os.getenv("BSC_RPC_URL", "https://binance.llamarpc.com")
         self.bet_amount_bnb = Decimal(os.getenv("BET_AMOUNT_BNB", "0.0005"))
-        self.dry_run = os.getenv("DRY_RUN", "false").strip().lower() in ("true", "1", "yes", "on")
+        self.dry_run = True  # 🛡️ FORZADO A TRUE (SAFETY LOCK)
         
         self.w3 = None
         self.contract = None

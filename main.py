@@ -47,7 +47,11 @@ def ask_initial_capital() -> Decimal:
 
 def render_panel(shared: SharedMarketState, crypto: CryptoFeed = None, engine: ArbitrageEngine = None, executor: Web3Executor = None) -> None:
     clear_console()
-    sniper_label = "🟢 ARMADO" if shared.sniper_state != SniperState.STOPPED else "🔴 STOPPED"
+    if shared.sniper_state == SniperState.STOPPED:
+        sniper_label = "🔴 STOPPED"
+    else:
+        is_dry_run = executor.dry_run if executor else os.getenv("DRY_RUN", "false").strip().lower() in ("true", "1", "yes", "on")
+        sniper_label = "🟡 SIMULACIÓN" if is_dry_run else "🟢 EN VIVO / REAL"
     p = shared.asset_prices
     print("=" * 86)
     print("🥞 PANCAKESWAP PREDICTION SNIPER (5m)")
