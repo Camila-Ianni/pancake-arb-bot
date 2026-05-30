@@ -43,6 +43,7 @@ class SharedMarketState:
         "inflight_assets",
         "decision_budget_ms",
         "log_messages",
+        "time_offset",
     )
 
     def __init__(self, initial_capital_usd: Decimal, sniper_state: SniperState = SniperState.IDLE) -> None:
@@ -72,6 +73,7 @@ class SharedMarketState:
         self.inflight_assets = set()
         self.decision_budget_ms = 10.0
         self.log_messages = deque(maxlen=8)
+        self.time_offset = 0.0  # Desfase temporal calibrado al arranque
 
 
 class PolymarketTick:

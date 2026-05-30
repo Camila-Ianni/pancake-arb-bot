@@ -215,6 +215,13 @@ def main() -> None:
             sys.exit(0)
         except SystemExit:
             os._exit(0)
+    except Exception:
+        import traceback
+        print("\n🚨 [CRITICAL EXCEPTION DETECTED] main() Top-Level Crash:")
+        traceback.print_exc()
+        with open("crash_report.log", "a") as f:
+            f.write(f"MAIN CRASH: {traceback.format_exc()}\n")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

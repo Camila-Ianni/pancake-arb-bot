@@ -23,13 +23,40 @@ class ExecutorMetrics:
         if len(self.latency_history_ms) > 100:
             self.latency_history_ms.pop(0)
 
-def _sync_setup_web3(rpc_url):
-    w3 = Web3(Web3.HTTPProvider(rpc_url))
-    contract = w3.eth.contract(
-        address=Web3.to_checksum_address(PANCAKESWAP_CONTRACT),
-        abi=PANCAKESWAP_PREDICTION_ABI
-    )
-    return w3, contract
+def _sync_setup_web3(primary_rpc_url):
+    RPC_POOL = [
+        primary_rpc_url,
+        "https://binance.llamarpc.com",
+        "https://bsc-dataseed1.defibit.io",
+        "https://bsc-dataseed1.ninicoin.io",
+        "https://bsc-mainnet.nodereal.io/v1/public"
+    ]
+    
+    seen = set()
+    pool = [x for x in RPC_POOL if not (x in seen or seen.add(x))]
+
+    for rpc in pool:
+        try:
+            w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={'timeout': 3}))
+            if not w3.is_connected():
+                continue
+                
+            try:
+                from web3.middleware import ExtraDataToPOAMiddleware
+                w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+            except ImportError:
+                from web3.middleware import geth_poa_middleware
+                w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+                
+            contract = w3.eth.contract(
+                address=Web3.to_checksum_address(PANCAKESWAP_CONTRACT),
+                abi=PANCAKESWAP_PREDICTION_ABI
+            )
+            return w3, contract
+        except Exception:
+            continue
+            
+    raise Exception("Fallaron todos los RPCs del Failover Cluster.")
 
 class Web3Executor:
     """
@@ -51,11 +78,15 @@ class Web3Executor:
         
         self.private_key = os.getenv("PRIVATE_KEY")
         self.wallet_address = os.getenv("WALLET_ADDRESS")
-        self.rpc_url = os.getenv("BSC_RPC_URL", "https://bsc-dataseed.binance.org/")
+        self.rpc_url = os.getenv("BSC_RPC_URL", "https://binance.llamarpc.com")
         self.bet_amount_bnb = Decimal(os.getenv("BET_AMOUNT_BNB", "0.0005"))
+        self.dry_run = os.getenv("DRY_RUN", "false").strip().lower() in ("true", "1", "yes", "on")
         
         self.w3 = None
         self.contract = None
+        
+        if self.dry_run:
+            self.shared_state.log_messages.append("🔮 [MODO SIMULACRO] DRY_RUN=true. No se transmitirán transacciones reales.")
         
         if not self.private_key or not self.wallet_address:
             self.shared_state.log_messages.append("⚠️ [ERROR CRÍTICO] PRIVATE_KEY o WALLET_ADDRESS no configurados.")
@@ -131,11 +162,40 @@ class Web3Executor:
     async def _execute_live_order(self, req: ExecutionRequest) -> tuple[str, bool, Decimal, Decimal]:
         """
         Ejecuta la apuesta en PancakeSwap usando run_in_executor para no bloquear el HFT loop.
+        En modo DRY_RUN, simula la ejecución sin transmitir a la red.
         """
         loop = asyncio.get_event_loop()
         epoch = self.shared_state.pancake_state["epoch"]
         value_wei = Web3.to_wei(self.bet_amount_bnb, 'ether')
         account = Web3.to_checksum_address(self.wallet_address)
+        
+        direction = "BULL 🟢" if req.side == OrderSide.YES else "BEAR 🔴"
+        p_state = self.shared_state.pancake_state
+        rem = p_state.get("remaining_seconds", "?")
+        
+        # ═══════════════════════════════════════════════════════════════
+        # 🔮 INTERCEPTOR DRY-RUN: Simula sin transmitir a la blockchain
+        # ═══════════════════════════════════════════════════════════════
+        if self.dry_run:
+            sim_time_ns = time.time_ns()
+            sim_hash = f"0xSIMULATED_HASH_{epoch}_{sim_time_ns}"
+            self.shared_state.log_messages.append(
+                f"🔮 [SIMULACRO DRY-RUN] ¡GATILLO ACCIONADO!"
+            )
+            self.shared_state.log_messages.append(
+                f"├ Epoch Objetivo: {epoch} | Dirección: {direction}"
+            )
+            self.shared_state.log_messages.append(
+                f"├ Tiempo Restante del Contrato: {rem}s"
+            )
+            self.shared_state.log_messages.append(
+                f"└ Simulación TX OK (Monto Protegido: {self.bet_amount_bnb} BNB) | Hash: {sim_hash[:30]}..."
+            )
+            return sim_hash, True, self.bet_amount_bnb, Decimal("0")
+
+        # ═══════════════════════════════════════════════════════════════
+        # 🔴 MODO LIVE: Transmisión real a la blockchain
+        # ═══════════════════════════════════════════════════════════════
         
         # Selección de función
         if req.side == OrderSide.YES:  # Bull
@@ -147,8 +207,8 @@ class Web3Executor:
             nonce = self.w3.eth.get_transaction_count(account)
             gas_price = self.w3.eth.gas_price
             
-            # Aumentar gas price ligeramente para prioridad HFT
-            gas_price = int(gas_price * 1.1)
+            # Aumentar gas price fuertemente para máxima prioridad HFT (Fast-Inclusion)
+            gas_price = int(gas_price * 1.5)
             
             tx = func.build_transaction({
                 'from': account,
@@ -163,6 +223,15 @@ class Web3Executor:
             
             # Enviar
             tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            
+            # Esperar confirmación de la red para evitar falsos positivos
+            try:
+                receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=30)
+                if receipt.status != 1:
+                    raise Exception("Transacción revertida por el Smart Contract (¿Monto muy bajo?).")
+            except Exception as e:
+                raise Exception(f"Fallo al confirmar: {e}")
+                
             return tx_hash.to_0x_hex()
             
         tx_hash_hex = await loop.run_in_executor(None, _build_and_send)
