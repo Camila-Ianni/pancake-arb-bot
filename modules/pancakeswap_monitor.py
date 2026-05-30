@@ -71,7 +71,7 @@ def _sync_setup_pancake(primary_rpc_url):
     for rpc in pool:
         try:
             print(f"🌐 [WSS FAILOVER] Intentando conectar a: {rpc}")
-            w3 = Web3(Web3.WebsocketProvider(rpc, websocket_timeout=5))
+            w3 = Web3(Web3.WebSocketProvider(rpc, websocket_timeout=5))
             if not w3.is_connected():
                 print(f"🌐 [WSS FAILOVER] {rpc} -> NO CONECTADO. Saltando...")
                 continue
