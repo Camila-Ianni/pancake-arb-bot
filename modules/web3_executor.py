@@ -169,34 +169,35 @@ class Web3Executor:
         Ejecuta la apuesta en PancakeSwap usando run_in_executor para no bloquear el HFT loop.
         En modo DRY_RUN, simula la ejecución sin transmitir a la red.
         """
-        loop = asyncio.get_event_loop()
-        epoch = self.shared_state.pancake_state["epoch"]
-        value_wei = Web3.to_wei(self.bet_amount_bnb, 'ether')
+        loop    = asyncio.get_event_loop()
+        epoch   = self.shared_state.pancake_state["epoch"]
         account = Web3.to_checksum_address(self.wallet_address)
-        
+
+        # ══ APUESTA DINÁMICA: 2% del capital disponible (interés compuesto) ══
+        bnb_price_usd = Decimal(str(self.shared_state.asset_prices.get("BNB", 720.0)))
+        if bnb_price_usd <= 0:
+            bnb_price_usd = Decimal("720")
+
+        capital_usd = self.shared_state.initial_capital_usd + self.shared_state.cumulative_pnl_usd
+        stake_usd   = max(capital_usd * Decimal("0.02"), Decimal("0.01"))  # mínimo $0.01
+        bet_bnb     = max((stake_usd / bnb_price_usd).quantize(Decimal("0.000001")), Decimal("0.0001"))
+        value_wei   = Web3.to_wei(bet_bnb, "ether")
+        # ══════════════════════════════════════════════════════════════════════
+
         direction = "BULL 🟢" if req.side == OrderSide.YES else "BEAR 🔴"
-        p_state = self.shared_state.pancake_state
-        rem = p_state.get("remaining_seconds", "?")
-        
+        p_state   = self.shared_state.pancake_state
+        rem       = p_state.get("remaining_seconds", "?")
+
         # ═══════════════════════════════════════════════════════════════
         # 🔮 INTERCEPTOR DRY-RUN: Simula sin transmitir a la blockchain
         # ═══════════════════════════════════════════════════════════════
         if self.dry_run:
-            sim_time_ns = time.time_ns()
-            sim_hash = f"0xSIMULATED_HASH_{epoch}_{sim_time_ns}"
+            sim_hash = f"0xSIM_{epoch}_{time.time_ns()}"
             self.shared_state.log_messages.append(
-                f"🔮 [SIMULACRO DRY-RUN] ¡GATILLO ACCIONADO!"
+                f"🔮 [SIM] Epoch {epoch} | {direction} | "
+                f"{bet_bnb:.6f} BNB (~${stake_usd:.3f}) | Rem: {rem}s"
             )
-            self.shared_state.log_messages.append(
-                f"├ Epoch Objetivo: {epoch} | Dirección: {direction}"
-            )
-            self.shared_state.log_messages.append(
-                f"├ Tiempo Restante del Contrato: {rem}s"
-            )
-            self.shared_state.log_messages.append(
-                f"└ Simulación TX OK (Monto Protegido: {self.bet_amount_bnb} BNB) | Hash: {sim_hash[:30]}..."
-            )
-            return sim_hash, True, self.bet_amount_bnb, Decimal("0")
+            return sim_hash, True, bet_bnb, Decimal("0")
 
         # ═══════════════════════════════════════════════════════════════
         # 🔴 MODO LIVE: Transmisión real a la blockchain

@@ -18,10 +18,10 @@ from models import (
 # ═══════════════════════════════════════════════════════════════════════════
 EMA_PERIOD          = 7       # Período de la EMA de corto plazo
 ATR_PERIOD          = 7       # Período del ATR
-ATR_MIN_THRESHOLD   = 0.10    # Mínimo de volatilidad en USD (si ATR < esto, skip)
+ATR_MIN_THRESHOLD   = 0.05    # ↓ Reducido: opera en mercados de menor volatilidad
 ATR_MAX_THRESHOLD   = 5.00    # Máximo de volatilidad en USD (si ATR > esto, skip)
-MOMENTUM_TICKS_REQ  = 3       # Ticks consecutivos de confirmación antes de disparar
-SAFETY_MARGIN_PCT   = Decimal("0.001")  # 0.1% spread mínimo vs lockPrice
+MOMENTUM_TICKS_REQ  = 2       # ↓ Reducido de 3→2: gatillo más sensible
+SAFETY_MARGIN_PCT   = Decimal("0.0004")  # ↓ ~0.04% → ~$0.29 spread mínimo a $720 BNB
 KILL_SWITCH_PNL_USD = Decimal("-1.00")  # Límite de pérdida acumulada en simulación
 
 
