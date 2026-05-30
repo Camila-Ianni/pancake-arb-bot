@@ -127,55 +127,94 @@ class PancakeSwapMonitor:
             # Compartir el offset con el engine via shared_state
             self.shared_state.time_offset = self.time_offset
             
-            # Inicialización en thread secundario
+            # Inicialización en thread secundario de Web3 crudo
             self.w3, self.contract = await loop.run_in_executor(None, _sync_setup_pancake, self.rpc_url)
             
+            # WSS POOL para suscripciones crudas
+            wss_pool = [
+                "wss://bsc-rpc.publicnode.com",
+                "wss://entrypoint.blockpi.io/v1/bsc/network",
+                "wss://bsc-mainnet.nodereal.io/ws/v1/public"
+            ]
+            current_ws_idx = 0
+            
+            import websockets
+            import json
+            
             while self._running:
+                ws_url = wss_pool[current_ws_idx]
+                print(f"📡 [WSS STREAM] Conectando a {ws_url} para newHeads...")
                 try:
-                    epoch, round_data, lock_price_raw = await loop.run_in_executor(None, _sync_pancake_call, self.contract)
-                    
-                    lock_timestamp = round_data[2]
-                    bull_amount_wei = round_data[9]
-                    bear_amount_wei = round_data[10]
-                    
-                    bull_amt = Decimal(bull_amount_wei) / Decimal(1e18)
-                    bear_amt = Decimal(bear_amount_wei) / Decimal(1e18)
-                    
-                    total = bull_amt + bear_amt
-                    bull_mult = (total * Decimal("0.97")) / bull_amt if bull_amt > 0 else Decimal("0")
-                    bear_mult = (total * Decimal("0.97")) / bear_amt if bear_amt > 0 else Decimal("0")
-                    
-                    # El oráculo de Chainlink en PancakeSwap usa 8 decimales
-                    lock_price = Decimal(lock_price_raw) / Decimal(1e8)
-                    
-                    # ═══════════════════════════════════════════════════════════
-                    # RELOJ HÍBRIDO CON CORRECCIÓN DE DESFASE (Time Offset Correction)
-                    # lockTimestamp: anclado del contrato on-chain (inmutable).
-                    # time.time() + self.time_offset: reloj local corregido atómicamente.
-                    # ═══════════════════════════════════════════════════════════
-                    corrected_time = time.time() + self.time_offset
-                    remaining_s = int(lock_timestamp - corrected_time)
-                    
-                    self.shared_state.pancake_state = {
-                        "epoch": epoch,
-                        "lock_timestamp": lock_timestamp,
-                        "remaining_seconds": remaining_s,
-                        "lock_price": lock_price,
-                        "bull_amount": bull_amt,
-                        "bear_amount": bear_amt,
-                        "bull_multiplier": bull_mult,
-                        "bear_multiplier": bear_mult
-                    }
-                    
+                    async with websockets.connect(ws_url, ping_interval=20, ping_timeout=20) as ws:
+                        # Enviar suscripción a newHeads
+                        sub_msg = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_subscribe", "params": ["newHeads"]})
+                        await ws.send(sub_msg)
+                        print(f"✅ [WSS STREAM] Suscrito a newHeads en {ws_url}. Modo BLOCK-DRIVEN activo.")
+                        
+                        while self._running:
+                            msg = await asyncio.wait_for(ws.recv(), timeout=15.0)
+                            data = json.loads(msg)
+                            
+                            # Ignorar respuesta inicial de suscripción
+                            if "result" in data and "params" not in data:
+                                continue
+                                
+                            if "params" in data and "result" in data["params"]:
+                                block = data["params"]["result"]
+                                block_ts_hex = block.get("timestamp")
+                                if block_ts_hex:
+                                    block_timestamp = int(block_ts_hex, 16)
+                                    
+                                    # 2. CALIBRACIÓN AUTOMÁTICA DEL ANCHOR POR BLOQUE
+                                    # Al recibir el bloque, calibramos el offset local usando el timestamp on-chain
+                                    # Esto elimina cualquier jitter derivado del RTT de la red HTTP.
+                                    self.time_offset = block_timestamp - time.time()
+                                    self.shared_state.time_offset = self.time_offset
+                                    
+                                    # Consultar contrato al ritmo del bloque (Block-Driven)
+                                    epoch, round_data, lock_price_raw = await loop.run_in_executor(
+                                        None, _sync_pancake_call, self.contract
+                                    )
+                                    
+                                    lock_timestamp = round_data[2]
+                                    bull_amount_wei = round_data[9]
+                                    bear_amount_wei = round_data[10]
+                                    
+                                    bull_amt = Decimal(bull_amount_wei) / Decimal(1e18)
+                                    bear_amt = Decimal(bear_amount_wei) / Decimal(1e18)
+                                    
+                                    total = bull_amt + bear_amt
+                                    bull_mult = (total * Decimal("0.97")) / bull_amt if bull_amt > 0 else Decimal("0")
+                                    bear_mult = (total * Decimal("0.97")) / bear_amt if bear_amt > 0 else Decimal("0")
+                                    
+                                    lock_price = Decimal(lock_price_raw) / Decimal(1e8)
+                                    
+                                    # El segundero local 'rem' será corregido por la calibración atómica de este bloque
+                                    corrected_time = time.time() + self.time_offset
+                                    remaining_s = int(lock_timestamp - corrected_time)
+                                    
+                                    self.shared_state.pancake_state = {
+                                        "epoch": epoch,
+                                        "lock_timestamp": lock_timestamp,
+                                        "remaining_seconds": remaining_s,
+                                        "lock_price": lock_price,
+                                        "bull_amount": bull_amt,
+                                        "bear_amount": bear_amt,
+                                        "bull_multiplier": bull_mult,
+                                        "bear_multiplier": bear_mult
+                                    }
+                                    
+                except (websockets.exceptions.ConnectionClosed, asyncio.TimeoutError) as e:
+                    print(f"⚠️ [WSS STREAM] Conexión caída en {ws_url} ({type(e).__name__}). Reconectando...")
+                    current_ws_idx = (current_ws_idx + 1) % len(wss_pool)
+                    await asyncio.sleep(1)
                 except Exception as e:
-                    err_msg = f"⚠️ [PANCAKE] Loop Crash: {e}"
+                    err_msg = f"⚠️ [WSS STREAM] Error crítico: {e}"
                     self.shared_state.log_messages.append(err_msg)
-                    print(f"🚨 [CRITICAL EXCEPTION DETECTED] PancakeSwap Monitor Loop")
+                    print(f"🚨 [CRITICAL EXCEPTION DETECTED] WSS Stream Loop")
                     traceback.print_exc()
-                    with open("crash_report.log", "a") as f:
-                        f.write(f"{err_msg} | {traceback.format_exc()}\n")
-                
-                await asyncio.sleep(2)
+                    current_ws_idx = (current_ws_idx + 1) % len(wss_pool)
+                    await asyncio.sleep(1)
         except Exception as e:
             err_msg = f"⚠️ [PANCAKE] START FATAL CRASH: {e}"
             self.shared_state.log_messages.append(err_msg)
