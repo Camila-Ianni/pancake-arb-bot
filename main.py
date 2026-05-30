@@ -172,13 +172,14 @@ async def run() -> None:
 
     crypto = CryptoFeed(shared_state=shared)
     monitor = PancakeSwapMonitor(shared_state=shared)
-    engine = ArbitrageEngine(shared_state=shared, execution_queue=execution_queue, runtime_cfg=runtime_cfg)
     executor = Web3Executor(
         execution_queue=execution_queue,
         result_queue=result_queue,
         shared_state=shared,
         runtime_cfg=runtime_cfg,
     )
+    # Inyectar referencia del executor al engine para auto-claim y outcome resolution
+    engine = ArbitrageEngine(shared_state=shared, execution_queue=execution_queue, executor=executor, runtime_cfg=runtime_cfg)
 
     tasks = [
         asyncio.create_task(crypto.start(), name="CryptoFeed"),

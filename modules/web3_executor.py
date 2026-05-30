@@ -99,6 +99,11 @@ class Web3Executor:
             self.w3, self.contract = await loop.run_in_executor(None, _sync_setup_web3, self.rpc_url)
             
             self._running = True
+            
+            # ── AUTO-HARVESTER al arranque ──────────────────────────────────
+            await self.run_harvester()
+            # ───────────────────────────────────────────────────────────────
+            
             worker_count = max(1, self.runtime_cfg.max_parallel_signals)
             self._workers = [
                 asyncio.create_task(self._worker(), name=f"Web3Worker-{i}")
@@ -237,6 +242,126 @@ class Web3Executor:
         tx_hash_hex = await loop.run_in_executor(None, _build_and_send)
         
         return tx_hash_hex, True, self.bet_amount_bnb, Decimal("0")
+
+    async def run_harvester(self) -> None:
+        """
+        AUTO-HARVESTER: Escanea las últimas 10 rondas cerradas al arrancar.
+        Detecta Epochs ganados y pendientes de cobro, y emite un batch claim.
+        """
+        if self.dry_run:
+            print("🔮 [HARVESTER] Modo DRY_RUN: saltando auto-cobro real.")
+            return
+
+        if not self.wallet_address or not self.private_key:
+            print("⚠️ [HARVESTER] Sin wallet configurada. Saltando harvester.")
+            return
+
+        loop = asyncio.get_event_loop()
+
+        def _scan_and_claim():
+            print("💰 [HARVESTER] Escaneando rondas pasadas para auto-cobro...")
+            account = Web3.to_checksum_address(self.wallet_address)
+            current_epoch = self.contract.functions.currentEpoch().call()
+
+            claimable_epochs = []
+            for i in range(2, 12):  # Rondas [current-2 .. current-11] (cerradas)
+                target = current_epoch - i
+                if target <= 0:
+                    break
+                try:
+                    is_claimable = self.contract.functions.claimable(target, account).call()
+                    if is_claimable:
+                        claimable_epochs.append(target)
+                        print(f"  ├ Epoch {target}: GANADO ✅ (pendiente de cobro)")
+                    else:
+                        ledger = self.contract.functions.ledger(target, account).call()
+                        claimed = ledger[2]
+                        amount  = ledger[1]
+                        if amount > 0 and claimed:
+                            print(f"  ├ Epoch {target}: ya cobrado ✔")
+                        elif amount == 0:
+                            print(f"  ├ Epoch {target}: sin apuesta registrada")
+                        else:
+                            print(f"  ├ Epoch {target}: PERDIDO ❌")
+                except Exception as e:
+                    print(f"  ├ Epoch {target}: error al consultar ({e})")
+
+            if not claimable_epochs:
+                print("💰 [HARVESTER] No hay ganancias pendientes. Continuando...")
+                return None
+
+            print(f"💰 [HARVESTER] ¡Detectadas ganancias pendientes en las rondas: {claimable_epochs}!")
+
+            nonce     = self.w3.eth.get_transaction_count(account)
+            gas_price = int(self.w3.eth.gas_price * 1.5)
+
+            tx = self.contract.functions.claim(claimable_epochs).build_transaction({
+                'from': account,
+                'nonce': nonce,
+                'gasPrice': gas_price,
+                'gas': 300000,
+            })
+            signed = self.w3.eth.account.sign_transaction(tx, private_key=self.private_key)
+            tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
+            receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+
+            if receipt.status == 1:
+                msg = f"✅ [HARVESTER] Transacción de cobro enviada. Fondos restaurados a tu Trust Wallet. Hash: {tx_hash.hex()}"
+            else:
+                msg = f"❌ [HARVESTER] Transacción de cobro revertida. Hash: {tx_hash.hex()}"
+            print(msg)
+            return msg
+
+        try:
+            result = await loop.run_in_executor(None, _scan_and_claim)
+            if result:
+                self.shared_state.log_messages.append(result)
+        except Exception:
+            import traceback
+            print("🚨 [CRITICAL EXCEPTION DETECTED] run_harvester:")
+            traceback.print_exc()
+
+    async def execute_auto_claim(self, epoch: int) -> bool:
+        """
+        Cobra una sola ronda ganada. Llamado por ArbitrageEngine tras resolver outcome.
+        Retorna True si el cobro fue exitoso.
+        """
+        if self.dry_run:
+            print(f"🔮 [AUTO-CLAIM] DRY_RUN: simulando cobro de Epoch {epoch}.")
+            return True
+
+        loop = asyncio.get_event_loop()
+        account = Web3.to_checksum_address(self.wallet_address)
+
+        def _do_claim():
+            nonce     = self.w3.eth.get_transaction_count(account)
+            gas_price = int(self.w3.eth.gas_price * 1.5)
+
+            tx = self.contract.functions.claim([epoch]).build_transaction({
+                'from': account,
+                'nonce': nonce,
+                'gasPrice': gas_price,
+                'gas': 200000,
+            })
+            signed  = self.w3.eth.account.sign_transaction(tx, private_key=self.private_key)
+            tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
+            receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+            return receipt.status == 1, tx_hash.hex()
+
+        try:
+            ok, tx_hex = await loop.run_in_executor(None, _do_claim)
+            if ok:
+                msg = f"✅ [AUTO-CLAIM] Epoch {epoch} cobrado con éxito. Hash: {tx_hex}"
+            else:
+                msg = f"❌ [AUTO-CLAIM] Cobro de Epoch {epoch} revertido. Hash: {tx_hex}"
+            print(msg)
+            self.shared_state.log_messages.append(msg)
+            return ok
+        except Exception:
+            import traceback
+            print(f"🚨 [CRITICAL EXCEPTION DETECTED] execute_auto_claim(epoch={epoch}):")
+            traceback.print_exc()
+            return False
 
     async def stop(self) -> None:
         self._running = False

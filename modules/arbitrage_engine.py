@@ -2,8 +2,10 @@ import asyncio
 import time
 import traceback
 from decimal import Decimal
+from typing import Optional, TYPE_CHECKING
 
-from typing import Optional
+if TYPE_CHECKING:
+    from modules.web3_executor import Web3Executor
 
 from models import SniperAsset, SniperState, ExecutionRequest, ExecutionResult, SniperSignal, OrderSide, SharedMarketState, RuntimeConfig
 
@@ -12,15 +14,18 @@ class ArbitrageEngine:
         self,
         execution_queue: "asyncio.Queue[ExecutionRequest]",
         shared_state: SharedMarketState,
+        executor: Optional["Web3Executor"] = None,
         runtime_cfg: Optional[RuntimeConfig] = None
     ) -> None:
         self.execution_queue = execution_queue
         self.shared_state = shared_state
+        self.executor = executor  # Referencia inyectada para auto-claim
         self.runtime_cfg = runtime_cfg or RuntimeConfig()
         self._running = False
         self._fired_window = {SniperAsset.BNB: False}
         self.last_pancake_epoch = 0
         self.executed_epochs = {}
+        self.placed_bets: dict[int, str] = {}  # {epoch: 'BULL'|'BEAR'}
 
     async def start(self) -> None:
         self._running = True
@@ -37,6 +42,9 @@ class ArbitrageEngine:
                 if self.shared_state.sniper_state == SniperState.FIRING:
                     await asyncio.sleep(0.01)
                     continue
+
+                # Resolver outcomes de apuestas pasadas
+                await self._resolve_outcomes()
 
                 await self._evaluate_opportunities()
             except Exception as e:
@@ -116,9 +124,82 @@ class ArbitrageEngine:
         self.shared_state.latest_status = "FIRING_BSC_TX"
         self.shared_state.inflight_assets.add(SniperAsset.BNB)
         
+        # Registrar en el ledger de apuestas activas
+        direction = "BULL" if side == OrderSide.YES else "BEAR"
+        self.placed_bets[epoch] = direction
+        
         await self.execution_queue.put(ExecutionRequest(signal=signal, side=side))
         self.shared_state.last_signal_ns = signal.signal_ns
         self.executed_epochs[epoch] = True
+
+    async def _resolve_outcomes(self) -> None:
+        """
+        Para cada apuesta en placed_bets, si el epoch ya cerró (currentEpoch >= epoch+2),
+        consulta lockPrice y closePrice en el contrato y emite el resultado.
+        Si ganó, dispara el auto-claim.
+        """
+        if not self.placed_bets:
+            return
+
+        current_epoch = self.shared_state.pancake_state.get("epoch", 0)
+        if current_epoch == 0:
+            return
+
+        # Importar contrato del executor
+        if self.executor is None or self.executor.contract is None:
+            return
+
+        resolved = []
+        for target_epoch, direction in list(self.placed_bets.items()):
+            if current_epoch < target_epoch + 2:
+                continue  # Ronda aún no cerrada definitivamente
+
+            try:
+                loop = asyncio.get_event_loop()
+                round_data = await loop.run_in_executor(
+                    None,
+                    self.executor.contract.functions.rounds(target_epoch).call
+                )
+                lock_price_raw  = round_data[4]   # int256
+                close_price_raw = round_data[5]   # int256
+                oracle_called   = round_data[13]  # bool
+
+                if not oracle_called:
+                    continue  # Datos aún no confirmados on-chain
+
+                lock_price  = lock_price_raw  / 1e8
+                close_price = close_price_raw / 1e8
+
+                if direction == "BULL":
+                    won = close_price > lock_price
+                else:
+                    won = close_price < lock_price
+
+                if won:
+                    msg = (f"🎉 [BALANCE] Epoch {target_epoch}: ¡APUESTA GANADA! 🟢 "
+                           f"(Lock: {lock_price:.4f} | Close: {close_price:.4f})")
+                    self.shared_state.log_messages.append(msg)
+                    print(msg)
+                    # ── Auto-cobro inmediato ──────────────────────────────
+                    if self.executor:
+                        asyncio.create_task(
+                            self.executor.execute_auto_claim(target_epoch),
+                            name=f"AutoClaim-{target_epoch}"
+                        )
+                else:
+                    msg = (f"💀 [BALANCE] Epoch {target_epoch}: ¡APUESTA PERDIDA! 🔴 "
+                           f"(Lock: {lock_price:.4f} | Close: {close_price:.4f})")
+                    self.shared_state.log_messages.append(msg)
+                    print(msg)
+
+                resolved.append(target_epoch)
+
+            except Exception:
+                print(f"🚨 [CRITICAL EXCEPTION DETECTED] _resolve_outcomes(epoch={target_epoch}):")
+                traceback.print_exc()
+
+        for ep in resolved:
+            self.placed_bets.pop(ep, None)
 
     def on_execution_result(self, asset: SniperAsset, pnl_delta: Decimal) -> None:
         self.shared_state.cumulative_pnl_usd += pnl_delta

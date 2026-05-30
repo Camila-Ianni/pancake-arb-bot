@@ -58,24 +58,22 @@ def _calibrate_time_offset():
     return 0.0
 
 def _sync_setup_pancake(primary_rpc_url):
-    RPC_POOL = [
-        primary_rpc_url,
-        "https://binance.llamarpc.com",
-        "https://bsc-dataseed1.defibit.io",
-        "https://bsc-dataseed1.ninicoin.io",
-        "https://bsc-mainnet.nodereal.io/v1/public"
+    WSS_POOL = [
+        "wss://bsc-rpc.publicnode.com",
+        "wss://entrypoint.blockpi.io/v1/bsc/network",
+        "wss://bsc-mainnet.nodereal.io/ws/v1/public"
     ]
     
     # Eliminar duplicados manteniendo orden
     seen = set()
-    pool = [x for x in RPC_POOL if not (x in seen or seen.add(x))]
+    pool = [x for x in WSS_POOL if not (x in seen or seen.add(x))]
 
     for rpc in pool:
         try:
-            print(f"🌐 [RPC FAILOVER] Intentando conectar a: {rpc}")
-            w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={'timeout': 3}))
+            print(f"🌐 [WSS FAILOVER] Intentando conectar a: {rpc}")
+            w3 = Web3(Web3.WebsocketProvider(rpc, websocket_timeout=5))
             if not w3.is_connected():
-                print(f"🌐 [RPC FAILOVER] {rpc} -> NO CONECTADO. Saltando...")
+                print(f"🌐 [WSS FAILOVER] {rpc} -> NO CONECTADO. Saltando...")
                 continue
             
             try:
@@ -85,18 +83,18 @@ def _sync_setup_pancake(primary_rpc_url):
                 from web3.middleware import geth_poa_middleware
                 w3.middleware_onion.inject(geth_poa_middleware, layer=0)
             
-            print(f"✅ [RPC FAILOVER] Conectado exitosamente a: {rpc}")
+            print(f"✅ [WSS FAILOVER] Conectado exitosamente a: {rpc}")
             contract = w3.eth.contract(
                 address=Web3.to_checksum_address(PANCAKESWAP_CONTRACT),
                 abi=PANCAKESWAP_PREDICTION_ABI
             )
             return w3, contract
         except Exception:
-            print(f"🚨 [RPC FAILOVER] Fallo en {rpc}:")
+            print(f"🚨 [WSS FAILOVER] Fallo en {rpc}:")
             traceback.print_exc()
             continue
             
-    raise Exception("Fallaron todos los RPCs del Failover Cluster.")
+    raise Exception("Fallaron todos los WSS del Failover Cluster.")
 
 def _sync_pancake_call(contract):
     epoch = contract.functions.currentEpoch().call()
