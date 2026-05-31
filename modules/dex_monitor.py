@@ -59,10 +59,12 @@ def build_dex_reader(primary_rpc_url: str):
             )
             print(f"✅ [DEX MONITOR] Router V2 conectado: {rpc}")
             return w3, router
-        except Exception:
+        except (Exception, AttributeError) as e:
             continue
 
-    raise RuntimeError("DEX Monitor: Fallaron todos los nodos RPC.")
+    # Si fallan todos, en lugar de crashear devolvemos None, None
+    print("⚠️ [DEX Monitor] Fallaron todos los nodos RPC. Reintentando en próximo ciclo...")
+    return None, None
 
 
 def fetch_pancake_bnb_price(router_contract) -> Decimal:

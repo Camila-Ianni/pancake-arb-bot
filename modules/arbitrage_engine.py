@@ -25,12 +25,12 @@ from models import (
 # ═══════════════════════════════════════════════════════════════════════════
 # PARÁMETROS DE ARBITRAJE — ajusta estos para calibrar la estrategia
 # ═══════════════════════════════════════════════════════════════════════════
-PROFIT_THRESHOLD_PCT  = Decimal("0.002")   # 0.20% — margen mínimo neto para disparar
-GAS_COST_USD_EST      = Decimal("0.08")    # ~$0.08 gas en BSC por tx (conservador)
+PROFIT_THRESHOLD_PCT  = Decimal("0.0012")  # ↓ Reducido al 0.12% neto
+# El gas se calculará de forma dinámica en base al precio de BNB
 SLIPPAGE_PCT          = Decimal("0.001")   # 0.10% slippage estimado en swap
 PANCAKE_FEE_PCT       = Decimal("0.0025")  # 0.25% fee del LP de PancakeSwap V2
 KILL_SWITCH_PNL_USD   = Decimal("-1.00")   # Límite de pérdida acumulada en simulación
-DEX_POLL_INTERVAL_S   = 3.0               # Cada cuántos segundos consultar el DEX (≈1 bloque BSC)
+DEX_POLL_INTERVAL_S   = 0.5               # ↓ Reducido a 0.5s para HFT
 COOLDOWN_AFTER_FIRE_S = 30.0              # Cooldown entre disparos para evitar over-trading
 
 
@@ -53,11 +53,13 @@ def calculate_spread(binance_price: Decimal, pancake_price: Decimal) -> dict:
     spread_pct_abs = abs(spread_pct)
 
     # Costos totales estimados como fracción del capital
-    # Gas se normaliza sobre el capital apostado para comparar correctamente
-    # (se resuelve al momento de ejecutar con la apuesta dinámica)
-    total_cost_pct = SLIPPAGE_PCT + PANCAKE_FEE_PCT  # gas se descuenta por separado en USD
+    total_cost_pct = SLIPPAGE_PCT + PANCAKE_FEE_PCT
 
     net_profit_pct = spread_pct_abs - total_cost_pct
+
+    # Estimación de Gas Dinámico BSC: ~150,000 gas units a 1.5 Gwei = 0.000225 BNB
+    gas_cost_bnb = Decimal("0.000225")
+    gas_cost_usd = gas_cost_bnb * binance_price
 
     return {
         "viable": net_profit_pct > PROFIT_THRESHOLD_PCT,
@@ -65,6 +67,7 @@ def calculate_spread(binance_price: Decimal, pancake_price: Decimal) -> dict:
         "net_profit_pct": net_profit_pct,
         "direction": direction,
         "spread_usd": abs(spread_abs),
+        "gas_cost_usd": gas_cost_usd
     }
 
 
@@ -167,6 +170,12 @@ class ArbitrageEngine:
                         await self._try_fire(bnb_binance, bnb_pancake, info)
                     else:
                         self.arb_status = "WAITING_FOR_SPREAD"
+                        # Log de Oportunidad Percibida (> 0.10%)
+                        if info["spread_pct"] >= Decimal("0.001"):
+                            self.shared_state.log_messages.append(
+                                f"👀 [OPORTUNIDAD PERCIBIDA] Spread Bruto: {info['spread_pct']*100:.3f}% "
+                                f"| Net: {info['net_profit_pct']*100:.3f}% (No alcanza umbral {PROFIT_THRESHOLD_PCT*100:.2f}%)"
+                            )
                 else:
                     self.arb_status = "WARMING_UP"
 
@@ -198,14 +207,25 @@ class ArbitrageEngine:
 
         # Validar que el gas no se lleve toda la ganancia
         expected_gross_usd = stake_usd * info["net_profit_pct"]
-        if expected_gross_usd <= GAS_COST_USD_EST:
+        dynamic_gas_usd    = info["gas_cost_usd"]
+
+        if expected_gross_usd <= dynamic_gas_usd:
             self.shared_state.log_messages.append(
-                f"⛽ [ARB SKIP] Ganancia bruta ${expected_gross_usd:.4f} ≤ gas estimado ${GAS_COST_USD_EST}. Apuesta insuficiente."
+                f"⛽ [ARB SKIP] Ganancia bruta ${expected_gross_usd:.4f} ≤ gas estimado ${dynamic_gas_usd:.4f}. Apuesta insuficiente."
             )
             return
 
         direction = info["direction"]
         side      = OrderSide.YES if direction == "BUY_PANCAKE" else OrderSide.NO
+
+        # LOG DETALLADO ANTES DE DISPARAR
+        net_pct_display = float(info["net_profit_pct"]) * 100
+        spread_display = float(info["spread_pct"]) * 100
+        self.shared_state.log_messages.append(
+            f"🚀 [ARB EXECUTION PRE-FLIGHT] "
+            f"BIN: ${binance_price:.2f} | DEX: ${pancake_price:.2f} | SPREAD: {spread_display:.3f}% | "
+            f"GAS EST: ${dynamic_gas_usd:.3f} | NET PROFIT: {net_pct_display:.3f}% | STAKE: ${stake_usd:.2f}"
+        )
 
         signal = SniperSignal(
             asset=SniperAsset.BNB,
