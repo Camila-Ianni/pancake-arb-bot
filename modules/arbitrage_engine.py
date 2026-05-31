@@ -1,7 +1,16 @@
+"""
+Arbitrage Engine — Spot-to-DEX (Binance vs PancakeSwap V2)
+
+Estrategia:
+  - Monitorea BNB/USDT en Binance (vía WebSocket, ya activo en CryptoFeed)
+  - Monitorea BNB/USDT en PancakeSwap V2 Router (vía getAmountsOut)
+  - Dispara cuando el spread bruto - costos de tx > PROFIT_THRESHOLD_PCT (0.2%)
+  - Gestión de riesgo: bet dinámico del 2% del capital (interés compuesto)
+  - Kill Switch automático si PnL acumulado cae bajo KILL_SWITCH_PNL_USD
+"""
 import asyncio
 import time
 import traceback
-from collections import deque
 from decimal import Decimal
 from typing import Optional, TYPE_CHECKING
 
@@ -10,45 +19,53 @@ if TYPE_CHECKING:
 
 from models import (
     SniperAsset, SniperState, ExecutionRequest, ExecutionResult,
-    SniperSignal, OrderSide, SharedMarketState, RuntimeConfig
+    SniperSignal, OrderSide, SharedMarketState, RuntimeConfig,
 )
 
 # ═══════════════════════════════════════════════════════════════════════════
-# PARÁMETROS CUANTITATIVOS - Ajusta estos valores para calibrar la estrategia
+# PARÁMETROS DE ARBITRAJE — ajusta estos para calibrar la estrategia
 # ═══════════════════════════════════════════════════════════════════════════
-EMA_PERIOD          = 7       # Período de la EMA de corto plazo
-ATR_PERIOD          = 7       # Período del ATR
-ATR_MIN_THRESHOLD   = 0.05    # ↓ Reducido: opera en mercados de menor volatilidad
-ATR_MAX_THRESHOLD   = 5.00    # Máximo de volatilidad en USD (si ATR > esto, skip)
-MOMENTUM_TICKS_REQ  = 2       # ↓ Reducido de 3→2: gatillo más sensible
-SAFETY_MARGIN_PCT   = Decimal("0.0004")  # ↓ ~0.04% → ~$0.29 spread mínimo a $720 BNB
-KILL_SWITCH_PNL_USD = Decimal("-1.00")  # Límite de pérdida acumulada en simulación
+PROFIT_THRESHOLD_PCT  = Decimal("0.002")   # 0.20% — margen mínimo neto para disparar
+GAS_COST_USD_EST      = Decimal("0.08")    # ~$0.08 gas en BSC por tx (conservador)
+SLIPPAGE_PCT          = Decimal("0.001")   # 0.10% slippage estimado en swap
+PANCAKE_FEE_PCT       = Decimal("0.0025")  # 0.25% fee del LP de PancakeSwap V2
+KILL_SWITCH_PNL_USD   = Decimal("-1.00")   # Límite de pérdida acumulada en simulación
+DEX_POLL_INTERVAL_S   = 3.0               # Cada cuántos segundos consultar el DEX (≈1 bloque BSC)
+COOLDOWN_AFTER_FIRE_S = 30.0              # Cooldown entre disparos para evitar over-trading
 
 
-def _calc_ema(prices: deque, period: int) -> Optional[Decimal]:
-    """Calcula la EMA de un deque de precios. Retorna None si no hay suficientes datos."""
-    if len(prices) < period:
-        return None
-    k = Decimal("2") / Decimal(period + 1)
-    vals = list(prices)[-period:]
-    ema = Decimal(str(vals[0]))
-    for p in vals[1:]:
-        ema = Decimal(str(p)) * k + ema * (1 - k)
-    return ema
-
-
-def _calc_atr(highs: deque, lows: deque, closes: deque, period: int) -> Optional[float]:
+def calculate_spread(binance_price: Decimal, pancake_price: Decimal) -> dict:
     """
-    ATR simplificado usando spread high-low de cada tick de precio.
-    En este contexto, 'high' y 'low' son la variación máx/mín por bloque.
+    Compara el precio Binance (spot) vs PancakeSwap DEX y calcula:
+      - spread_pct: diferencia porcentual bruta
+      - net_profit_pct: spread_pct - costos totales (gas + slippage + fee LP)
+      - direction: 'BUY_PANCAKE' si Pancake más barato, 'SELL_PANCAKE' si más caro
+      - viable: True si net_profit_pct > PROFIT_THRESHOLD_PCT
     """
-    if len(highs) < period or len(lows) < period:
-        return None
-    trs = []
-    for i in range(-period, 0):
-        tr = float(highs[i]) - float(lows[i])
-        trs.append(abs(tr))
-    return sum(trs) / len(trs)
+    if binance_price <= 0 or pancake_price <= 0:
+        return {"viable": False, "spread_pct": Decimal("0"), "net_profit_pct": Decimal("0"), "direction": None}
+
+    # Spread bruto como fracción del precio de referencia (Binance)
+    spread_abs = binance_price - pancake_price
+    spread_pct = spread_abs / binance_price  # positivo → Pancake más barato (Buy opp)
+
+    direction = "BUY_PANCAKE" if spread_pct > 0 else "SELL_PANCAKE"
+    spread_pct_abs = abs(spread_pct)
+
+    # Costos totales estimados como fracción del capital
+    # Gas se normaliza sobre el capital apostado para comparar correctamente
+    # (se resuelve al momento de ejecutar con la apuesta dinámica)
+    total_cost_pct = SLIPPAGE_PCT + PANCAKE_FEE_PCT  # gas se descuenta por separado en USD
+
+    net_profit_pct = spread_pct_abs - total_cost_pct
+
+    return {
+        "viable": net_profit_pct > PROFIT_THRESHOLD_PCT,
+        "spread_pct": spread_pct_abs,
+        "net_profit_pct": net_profit_pct,
+        "direction": direction,
+        "spread_usd": abs(spread_abs),
+    }
 
 
 class ArbitrageEngine:
@@ -57,312 +74,173 @@ class ArbitrageEngine:
         execution_queue: "asyncio.Queue[ExecutionRequest]",
         shared_state: SharedMarketState,
         executor: Optional["Web3Executor"] = None,
-        runtime_cfg: Optional[RuntimeConfig] = None
+        runtime_cfg: Optional[RuntimeConfig] = None,
     ) -> None:
-        self.execution_queue  = execution_queue
-        self.shared_state     = shared_state
-        self.executor         = executor
-        self.runtime_cfg      = runtime_cfg or RuntimeConfig()
-        self._running         = False
-        self._fired_window    = {SniperAsset.BNB: False}
-        self.last_pancake_epoch = 0
-        self.executed_epochs: dict[int, bool] = {}
-        self.placed_bets: dict[int, str] = {}  # {epoch: 'BULL'|'BEAR'}
+        self.execution_queue = execution_queue
+        self.shared_state    = shared_state
+        self.executor        = executor
+        self.runtime_cfg     = runtime_cfg or RuntimeConfig()
+        self._running        = False
 
-        # ── Buffers para indicadores técnicos ─────────────────────────────
-        maxlen = max(EMA_PERIOD, ATR_PERIOD) * 4
-        self._price_history: deque = deque(maxlen=maxlen)   # precios BNB spot (Binance)
-        self._tick_highs: deque    = deque(maxlen=maxlen)   # high por bloque
-        self._tick_lows: deque     = deque(maxlen=maxlen)   # low por bloque
-        self._last_price: Optional[Decimal] = None           # precio previo
+        self._last_fire_ts: float = 0.0          # timestamp del último disparo
+        self._dex_price: Decimal  = Decimal("0") # precio DEX actualizado por el poller
+        self._spread_info: dict   = {}           # resultado del último calculate_spread
 
-        # ── Contador de momentum (ticks consecutivos con spread válido) ────
-        self._momentum_counter: int = 0
-        self._momentum_side: Optional[OrderSide] = None      # dirección confirmada
+        # Estado de oportunidad — leído por el panel de UI
+        self.arb_status: str       = "WARMING_UP"
+        self.binance_price: Decimal = Decimal("0")
+        self.pancake_price: Decimal = Decimal("0")
+        self.current_spread_pct: Decimal = Decimal("0")
+        self.net_profit_pct: Decimal     = Decimal("0")
 
     # ──────────────────────────────────────────────────────────────────────
     async def start(self) -> None:
         self._running = True
         self.shared_state.log_messages.append(
-            "🟢 [ARBITRAGE ENGINE] Iniciado — Estrategia: EMA Trend + ATR + Momentum Confirmation"
+            "🟢 [ARB ENGINE] Iniciado — Estrategia: Spot-to-DEX Arbitrage (Binance vs PancakeSwap V2)"
         )
-        asyncio.create_task(self._loop(), name="EngineLoop")
+        asyncio.create_task(self._dex_price_loop(), name="DexPricePoller")
+        asyncio.create_task(self._arb_loop(), name="ArbEngine")
 
     # ──────────────────────────────────────────────────────────────────────
-    async def _loop(self) -> None:
+    async def _dex_price_loop(self) -> None:
+        """Consulta el precio DEX cada ~3 s (1 bloque BSC) en thread secundario."""
+        loop = asyncio.get_event_loop()
+
+        # Esperar a que el executor tenga el contrato listo
+        for _ in range(30):
+            if self.executor and self.executor._dex_router:
+                break
+            await asyncio.sleep(1)
+        else:
+            self.shared_state.log_messages.append("⚠️ [DEX POLLER] Router V2 no disponible. Poller detenido.")
+            return
+
         while self._running:
             try:
-                # 1. Kill Switch de PnL: si caemos -$1.00 en simulación, congelamos
+                from modules.dex_monitor import fetch_pancake_bnb_price
+                price = await loop.run_in_executor(
+                    None, fetch_pancake_bnb_price, self.executor._dex_router
+                )
+                self._dex_price  = price
+                self.pancake_price = price
+            except Exception as e:
+                pass  # Fallo silencioso — el panel muestra 0 si no hay dato
+            await asyncio.sleep(DEX_POLL_INTERVAL_S)
+
+    # ──────────────────────────────────────────────────────────────────────
+    async def _arb_loop(self) -> None:
+        """Evalúa la oportunidad de arbitraje en cada tick."""
+        while self._running:
+            try:
+                # 1. Kill Switch de PnL
                 if self.shared_state.cumulative_pnl_usd <= KILL_SWITCH_PNL_USD:
                     if not self.shared_state.kill_switch:
                         self.shared_state.kill_switch = True
                         self.shared_state.log_messages.append(
-                            f"🚨 [KILL SWITCH] PnL acumulado = ${self.shared_state.cumulative_pnl_usd:.2f} "
-                            f"— Límite crítico alcanzado. Bot congelado. Resetea manualmente."
+                            f"🚨 [KILL SWITCH] PnL = ${self.shared_state.cumulative_pnl_usd:.2f} — "
+                            "Límite crítico. Bot congelado."
                         )
-
                 if self.shared_state.kill_switch:
+                    self.arb_status = "KILL_SWITCH_ON"
                     await asyncio.sleep(1)
                     continue
 
-                if self.shared_state.sniper_state == SniperState.FIRING:
-                    await asyncio.sleep(0.01)
-                    continue
+                # 2. Leer precio Binance del estado compartido
+                bnb_binance = Decimal(str(
+                    self.shared_state.asset_prices.get(SniperAsset.BNB, 0.0)
+                ))
+                self.binance_price = bnb_binance
 
-                # 2. Resolver outcomes de apuestas pasadas
-                await self._resolve_outcomes()
+                # 3. Leer precio DEX (actualizado por _dex_price_loop)
+                bnb_pancake = self._dex_price
 
-                # 3. Evaluar nueva oportunidad
-                await self._evaluate_opportunities()
+                # 4. Calcular spread
+                if bnb_binance > 0 and bnb_pancake > 0:
+                    info = calculate_spread(bnb_binance, bnb_pancake)
+                    self._spread_info        = info
+                    self.current_spread_pct  = info["spread_pct"]
+                    self.net_profit_pct      = info["net_profit_pct"]
+
+                    if info["viable"]:
+                        self.arb_status = "OPPORTUNITY_FOUND"
+                        await self._try_fire(bnb_binance, bnb_pancake, info)
+                    else:
+                        self.arb_status = "WAITING_FOR_SPREAD"
+                else:
+                    self.arb_status = "WARMING_UP"
 
             except Exception as e:
-                print(f"\n🚨 [CRITICAL EXCEPTION DETECTED] ArbitrageEngine Loop")
+                print(f"\n🚨 [CRITICAL] ArbLoop: {e}")
                 traceback.print_exc()
-                self.shared_state.log_messages.append(f"⚠️ [ENGINE ERROR] {e}")
-            await asyncio.sleep(0.1)
+                self.shared_state.log_messages.append(f"⚠️ [ARB ENGINE] Error: {e}")
+
+            await asyncio.sleep(0.5)
 
     # ──────────────────────────────────────────────────────────────────────
-    def _update_price_buffers(self, current_price: Decimal) -> None:
-        """Alimenta los buffers de indicadores con el precio más reciente."""
-        self._price_history.append(current_price)
-
-        if self._last_price is not None:
-            high = max(current_price, self._last_price)
-            low  = min(current_price, self._last_price)
-        else:
-            high = current_price
-            low  = current_price
-
-        self._tick_highs.append(high)
-        self._tick_lows.append(low)
-        self._last_price = current_price
-
-    # ──────────────────────────────────────────────────────────────────────
-    async def _evaluate_opportunities(self) -> None:
-        p_state = self.shared_state.pancake_state
-        epoch   = p_state["epoch"]
-
-        # Reset ventana si nuevo epoch
-        if epoch > self.last_pancake_epoch:
-            self.last_pancake_epoch = epoch
-            self._fired_window[SniperAsset.BNB] = False
-            self._momentum_counter = 0
-            self._momentum_side    = None
-
-        lock_timestamp = p_state.get("lock_timestamp")
-        if lock_timestamp is None:
+    async def _try_fire(self, binance_price: Decimal, pancake_price: Decimal, info: dict) -> None:
+        """
+        Valida el cooldown y los requisitos de capital antes de disparar.
+        Aplica el bet dinámico del 2% del capital.
+        """
+        now = time.time()
+        if now - self._last_fire_ts < COOLDOWN_AFTER_FIRE_S:
+            remaining_cd = int(COOLDOWN_AFTER_FIRE_S - (now - self._last_fire_ts))
+            self.arb_status = f"COOLDOWN ({remaining_cd}s)"
             return
 
-        # Reloj híbrido con offset atómico
-        offset         = getattr(self.shared_state, "time_offset", 0.0)
-        corrected_time = time.time() + offset
-        rem            = int(lock_timestamp - corrected_time)
-
-        # Solo operar en la ventana de disparo: 2–4 segundos antes del cierre
-        if rem > 4 or rem < 2:
+        if self.shared_state.sniper_state == SniperState.FIRING:
             return
 
-        # Anti-doble-disparo
-        if self.executed_epochs.get(epoch):
-            return
+        # Apuesta dinámica: 2% del capital actual
+        capital_usd = self.shared_state.initial_capital_usd + self.shared_state.cumulative_pnl_usd
+        stake_usd   = max(capital_usd * Decimal("0.02"), Decimal("0.01"))
 
-        # ── Datos base ────────────────────────────────────────────────────
-        bnb_price = Decimal(str(self.shared_state.asset_prices.get(SniperAsset.BNB, 0.0)))
-        if bnb_price <= 0:
-            self.shared_state.log_messages.append("⚠️ [ABORT] Sin precio BNB de Binance.")
-            return
-
-        lock_price = p_state.get("lock_price", Decimal("0"))
-        if lock_price <= 0:
-            self.shared_state.log_messages.append("⚠️ [ABORT] lockPrice no disponible.")
-            return
-
-        # Alimentar buffers con el tick actual
-        self._update_price_buffers(bnb_price)
-
-        # ── FILTRO 1: Safety Margin Spread (0.1%) ─────────────────────────
-        spread_abs    = abs(bnb_price - lock_price)
-        safety_margin = lock_price * SAFETY_MARGIN_PCT
-        if spread_abs <= safety_margin:
+        # Validar que el gas no se lleve toda la ganancia
+        expected_gross_usd = stake_usd * info["net_profit_pct"]
+        if expected_gross_usd <= GAS_COST_USD_EST:
             self.shared_state.log_messages.append(
-                f"🛡️ [STRATEGY SKIP] Spread insuficiente: Diff=${spread_abs:.2f} < Min=${safety_margin:.2f}"
-            )
-            self._momentum_counter = 0
-            return
-
-        # ── FILTRO 2: EMA Trend Confirmation ──────────────────────────────
-        ema = _calc_ema(self._price_history, EMA_PERIOD)
-        if ema is None:
-            self.shared_state.log_messages.append(
-                f"📊 [STRATEGY SKIP] EMA({EMA_PERIOD}) aún calentando ({len(self._price_history)}/{EMA_PERIOD} ticks)"
+                f"⛽ [ARB SKIP] Ganancia bruta ${expected_gross_usd:.4f} ≤ gas estimado ${GAS_COST_USD_EST}. Apuesta insuficiente."
             )
             return
 
-        # Tendencia: precio debe estar claramente por encima o debajo de la EMA
-        if bnb_price > ema:
-            candidate_side = OrderSide.YES   # BULL
-        elif bnb_price < ema:
-            candidate_side = OrderSide.NO    # BEAR
-        else:
-            self.shared_state.log_messages.append("📊 [STRATEGY SKIP] Precio == EMA. Mercado lateral.")
-            self._momentum_counter = 0
-            return
-
-        # ── FILTRO 3: ATR Volatility Window ───────────────────────────────
-        atr = _calc_atr(self._tick_highs, self._tick_lows, self._price_history, ATR_PERIOD)
-        if atr is None:
-            self.shared_state.log_messages.append("📈 [STRATEGY SKIP] ATR calentando...")
-            return
-
-        if atr < ATR_MIN_THRESHOLD:
-            self.shared_state.log_messages.append(
-                f"📉 [STRATEGY SKIP] Volatilidad demasiado baja (ATR={atr:.3f} < {ATR_MIN_THRESHOLD}). No cubre gas."
-            )
-            self._momentum_counter = 0
-            return
-
-        if atr > ATR_MAX_THRESHOLD:
-            self.shared_state.log_messages.append(
-                f"🌪️ [STRATEGY SKIP] Volatilidad extrema (ATR={atr:.3f} > {ATR_MAX_THRESHOLD}). Riesgo de reversal."
-            )
-            self._momentum_counter = 0
-            return
-
-        # ── FILTRO 4: Momentum Confirmation (3 ticks consecutivos) ────────
-        if candidate_side == self._momentum_side:
-            self._momentum_counter += 1
-        else:
-            # Cambió la dirección — reiniciar contador
-            self._momentum_counter = 1
-            self._momentum_side    = candidate_side
-
-        if self._momentum_counter < MOMENTUM_TICKS_REQ:
-            self.shared_state.log_messages.append(
-                f"⏳ [MOMENTUM] Confirmando señal {'BULL' if candidate_side == OrderSide.YES else 'BEAR'}: "
-                f"{self._momentum_counter}/{MOMENTUM_TICKS_REQ} ticks | EMA={ema:.2f} | ATR={atr:.3f}"
-            )
-            return
-
-        # ── TODOS LOS FILTROS PASADOS → DISPARO ──────────────────────────
-        side      = candidate_side
-        direction = "BULL 🟢" if side == OrderSide.YES else "BEAR 🔴"
+        direction = info["direction"]
+        side      = OrderSide.YES if direction == "BUY_PANCAKE" else OrderSide.NO
 
         signal = SniperSignal(
             asset=SniperAsset.BNB,
-            market_id=str(epoch),
-            condition_id=str(epoch),
+            market_id=f"ARB-{int(now)}",
+            condition_id=f"ARB-{int(now)}",
             yes_price=Decimal("0.5"),
-            strike_price=float(bnb_price),
-            mark_price=float(bnb_price),
-            bet_size_usd=Decimal("0"),
+            strike_price=float(pancake_price),
+            mark_price=float(binance_price),
+            bet_size_usd=stake_usd,
             signal_ns=time.time_ns(),
         )
 
+        net_pct_display = float(info["net_profit_pct"]) * 100
+
         self.shared_state.log_messages.append(
-            f"🎯 [SNIPER FIRE] Epoch: {epoch} | {direction} | "
-            f"BNB={bnb_price:.2f} | EMA={ema:.2f} | ATR={atr:.3f} | "
-            f"Momentum={self._momentum_counter}✓ | Rem={rem}s"
+            f"🎯 [ARB FIRE] {direction} | "
+            f"Binance=${binance_price:.2f} | DEX=${pancake_price:.2f} | "
+            f"Spread={float(info['spread_pct'])*100:.3f}% | "
+            f"Net={net_pct_display:.3f}% | Stake=${stake_usd:.3f}"
         )
 
         self.shared_state.sniper_state = SniperState.FIRING
-        self.shared_state.latest_status = "FIRING_BSC_TX"
+        self.shared_state.latest_status = f"FIRING: {direction}"
         self.shared_state.inflight_assets.add(SniperAsset.BNB)
+        self._last_fire_ts = now
 
-        self.placed_bets[epoch] = "BULL" if side == OrderSide.YES else "BEAR"
         await self.execution_queue.put(ExecutionRequest(signal=signal, side=side))
         self.shared_state.last_signal_ns = signal.signal_ns
-        self.executed_epochs[epoch] = True
-
-        # Resetear momentum tras disparo
-        self._momentum_counter = 0
-        self._momentum_side    = None
-
-    # ──────────────────────────────────────────────────────────────────────
-    async def _resolve_outcomes(self) -> None:
-        """
-        Consulta on-chain el resultado de cada apuesta registrada.
-        Actualiza cumulative_pnl_usd en shared_state para el panel de la UI.
-        """
-        if not self.placed_bets:
-            return
-
-        current_epoch = self.shared_state.pancake_state.get("epoch", 0)
-        if current_epoch == 0:
-            return
-
-        if self.executor is None or self.executor.contract is None:
-            return
-
-        resolved = []
-        for target_epoch, direction in list(self.placed_bets.items()):
-            if current_epoch < target_epoch + 2:
-                continue  # Ronda aún no cerrada
-
-            try:
-                loop = asyncio.get_event_loop()
-                round_data = await loop.run_in_executor(
-                    None,
-                    self.executor.contract.functions.rounds(target_epoch).call
-                )
-                lock_price_raw  = round_data[4]
-                close_price_raw = round_data[5]
-                oracle_called   = round_data[13]
-
-                if not oracle_called:
-                    continue
-
-                lock_price  = lock_price_raw  / 1e8
-                close_price = close_price_raw / 1e8
-
-                won = (close_price > lock_price) if direction == "BULL" else (close_price < lock_price)
-
-                # PnL virtual calculado en USD
-                bet_bnb   = self.executor.bet_amount_bnb if self.executor else Decimal("0.0005")
-                bnb_price = Decimal(str(self.shared_state.asset_prices.get(SniperAsset.BNB, 700.0)))
-                bet_usd   = bet_bnb * bnb_price
-
-                if won:
-                    p_state    = self.shared_state.pancake_state
-                    mult_key   = "bull_multiplier" if direction == "BULL" else "bear_multiplier"
-                    multiplier = p_state.get(mult_key, Decimal("1.9"))
-                    payout_usd = bet_usd * multiplier
-                    pnl_delta  = payout_usd - bet_usd
-                    self.shared_state.cumulative_pnl_usd += pnl_delta
-
-                    msg = (f"🎉 [BALANCE] Epoch {target_epoch}: ¡APUESTA GANADA! 🟢 "
-                           f"(Lock: {lock_price:.4f} | Close: {close_price:.4f} | PnL: +${pnl_delta:.2f})")
-                    self.shared_state.log_messages.append(msg)
-                    print(msg)
-
-                    if self.executor:
-                        asyncio.create_task(
-                            self.executor.execute_auto_claim(target_epoch),
-                            name=f"AutoClaim-{target_epoch}"
-                        )
-                else:
-                    pnl_delta = -bet_usd
-                    self.shared_state.cumulative_pnl_usd += pnl_delta
-
-                    msg = (f"💀 [BALANCE] Epoch {target_epoch}: ¡APUESTA PERDIDA! 🔴 "
-                           f"(Lock: {lock_price:.4f} | Close: {close_price:.4f} | PnL: -${bet_usd:.2f})")
-                    self.shared_state.log_messages.append(msg)
-                    print(msg)
-
-                resolved.append(target_epoch)
-
-            except Exception:
-                print(f"🚨 [CRITICAL EXCEPTION DETECTED] _resolve_outcomes(epoch={target_epoch}):")
-                traceback.print_exc()
-
-        for ep in resolved:
-            self.placed_bets.pop(ep, None)
 
     # ──────────────────────────────────────────────────────────────────────
     def on_execution_result(self, asset: SniperAsset, pnl_delta: Decimal) -> None:
         self.shared_state.cumulative_pnl_usd += pnl_delta
         self.shared_state.inflight_assets.discard(asset)
         self.shared_state.sniper_state = SniperState.ARMED
-        self.shared_state.latest_status = "ARMED"
+        self.shared_state.latest_status = "SCANNING_SPREADS"
 
     async def stop(self) -> None:
         self._running = False

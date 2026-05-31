@@ -47,60 +47,77 @@ def ask_initial_capital() -> Decimal:
 
 def render_panel(shared: SharedMarketState, crypto: CryptoFeed = None, engine: ArbitrageEngine = None, executor: Web3Executor = None) -> None:
     clear_console()
+
     if shared.sniper_state == SniperState.STOPPED:
-        sniper_label = "🔴 STOPPED"
+        mode_label = "🔴 STOPPED"
     else:
-        is_dry_run = executor.dry_run if executor else os.getenv("DRY_RUN", "false").strip().lower() in ("true", "1", "yes", "on")
-        sniper_label = "🟡 SIMULACIÓN" if is_dry_run else "🟢 EN VIVO / REAL"
-    p = shared.asset_prices
-    print("=" * 86)
-    print("🥞 PANCAKESWAP PREDICTION SNIPER (5m)")
-    print("=" * 86)
-    wallet_raw = os.getenv("WALLET_ADDRESS", "UNKNOWN")
+        is_dry_run = executor.dry_run if executor else True
+        mode_label = "🟡 SIMULACIÓN" if is_dry_run else "🟢 EN VIVO / REAL"
+
+    wallet_raw    = os.getenv("WALLET_ADDRESS", "UNKNOWN")
     wallet_suffix = wallet_raw[-4:] if len(wallet_raw) > 4 else "NONE"
-    
-    print(
-        f"Capital Inicial: ${shared.initial_capital_usd:.2f} | "
-        f"Ganancia Acumulada (PnL): ${shared.cumulative_pnl_usd:+.2f} | "
-        f"Estado del Sniper: {sniper_label}"
-    )
-    print(f"Wallet BNB: ...{wallet_suffix} | Status: {shared.latest_status[:70]}")
-    print("-" * 86)
-    print(
-        "Binance Mark | "
-        f"BTC: {p[SniperAsset.BTC]:.2f} | ETH: {p[SniperAsset.ETH]:.2f} | "
-        f"SOL: {p[SniperAsset.SOL]:.2f} | BNB: {p[SniperAsset.BNB]:.2f}"
-    )
-    print(
-        "Binance Threads | "
-        f"BTC: {'UP' if p[SniperAsset.BTC] > 0 else 'DOWN'} | "
-        f"ETH: {'UP' if p[SniperAsset.ETH] > 0 else 'DOWN'} | "
-        f"SOL: {'UP' if p[SniperAsset.SOL] > 0 else 'DOWN'} | "
-        f"BNB: {'UP' if p[SniperAsset.BNB] > 0 else 'DOWN'}"
-    )
-    print("-" * 86)
-    
-    ps = shared.pancake_state
-    print(f"🥞 Ronda (Epoch): {ps['epoch']} | Faltan: {ps['remaining_seconds']}s")
-    print(f"Bull Pool: {ps['bull_amount']:.2f} BNB ({ps['bull_multiplier']:.2f}x) | Bear Pool: {ps['bear_amount']:.2f} BNB ({ps['bear_multiplier']:.2f}x)")
-    print("-" * 86)
-    
-    if crypto and engine and executor:
-        print("⚡ TELEMETRÍA DE LATENCIA (HFT) ⚡")
-        print(f"├ Parseo WebSocket (Binance):   {crypto.metrics.avg_parse_ms:.5f} ms")
-        print(f"└ Ejecución Web3 (PancakeSwap): {executor.metrics.avg_sign_ms if hasattr(executor.metrics, 'avg_sign_ms') else 0.0:.5f} ms")
-        print("-" * 86)
-    print(
-        f"Inflight: {len(shared.inflight_assets)} | "
-        f"Kill Switch: {'ON' if shared.kill_switch else 'OFF'}"
-    )
+
     print("=" * 86)
-    
-    # --- LOGS SECTION ---
-    print("📝 REGISTRO DE EVENTOS & ALERTAS SNIPER")
+    print("⚡ PANCAKESWAP ARB BOT — Spot-to-DEX Arbitrage (BNB/USDT)")
+    print("=" * 86)
+    print(
+        f"Capital: ${shared.initial_capital_usd:.2f} | "
+        f"PnL: ${shared.cumulative_pnl_usd:+.4f} | "
+        f"Modo: {mode_label}"
+    )
+    print(f"Wallet: ...{wallet_suffix} | Status: {shared.latest_status[:60]}")
     print("-" * 86)
-    for msg in list(shared.log_messages)[-8:]:
-        print(f" {msg}")
+
+    # ── PRECIOS EN TIEMPO REAL ───────────────────────────────────────────
+    binance_bnb = engine.binance_price if engine else Decimal("0")
+    pancake_bnb = engine.pancake_price if engine else Decimal("0")
+    spread_pct  = engine.current_spread_pct if engine else Decimal("0")
+    net_pct     = engine.net_profit_pct     if engine else Decimal("0")
+    arb_status  = engine.arb_status         if engine else "N/A"
+
+    spread_usd  = abs(binance_bnb - pancake_bnb)
+    spread_display = f"{float(spread_pct)*100:.4f}%  (${spread_usd:.3f})"
+
+    cheaper = "PANCAKE ✅" if binance_bnb > pancake_bnb else ("BINANCE ✅" if pancake_bnb > binance_bnb else "IGUAL")
+
+    print(f"{'Fuente':<18} {'Precio BNB/USDT':>16}")
+    print(f"  {'Binance Spot':<16} ${binance_bnb:>14.4f}")
+    print(f"  {'PancakeSwap V2':<16} ${pancake_bnb:>14.4f}")
+    print(f"  {'Más barato en':<16} {cheaper:>15}")
+    print("-" * 86)
+
+    # ── SPREAD Y OPORTUNIDAD ─────────────────────────────────────────────
+    opp_icon = "🟢 OPPORTUNITY_FOUND" if arb_status == "OPPORTUNITY_FOUND" else f"🟠 {arb_status}"
+    print(f"Spread Bruto:  {spread_display:<30} | Estado: {opp_icon}")
+    print(f"Profit Neto:   {float(net_pct)*100:.4f}%   (umbral mínimo: 0.20%)")
+    print("-" * 86)
+
+    # ── FEED BINANCE (todos los activos) ─────────────────────────────────
+    p = shared.asset_prices
+    print(
+        f"Binance Feed | "
+        f"BTC: {p[SniperAsset.BTC]:.0f} | "
+        f"ETH: {p[SniperAsset.ETH]:.0f} | "
+        f"SOL: {p[SniperAsset.SOL]:.2f} | "
+        f"BNB: {p[SniperAsset.BNB]:.2f}"
+    )
+    print("-" * 86)
+
+    # ── TELEMETRÍA HFT ───────────────────────────────────────────────────
+    if crypto and executor:
+        avg_parse = crypto.metrics.avg_parse_ms
+        avg_sign  = executor.metrics.latency_history_ms
+        avg_exec  = sum(avg_sign) / len(avg_sign) if avg_sign else 0.0
+        print(f"⚡ LATENCIA | Binance WS: {avg_parse:.4f}ms | Web3 Exec: {avg_exec:.4f}ms")
+        print(f"   Kill Switch: {'🔴 ON' if shared.kill_switch else '🟢 OFF'} | "
+              f"Inflight: {len(shared.inflight_assets)}")
+    print("=" * 86)
+
+    # ── LOG ──────────────────────────────────────────────────────────────
+    print("📝 EVENTOS")
+    print("-" * 86)
+    for msg in list(shared.log_messages)[-7:]:
+        print(f"  {msg}")
     print("=" * 86)
 
 

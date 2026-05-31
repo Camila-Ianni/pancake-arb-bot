@@ -8,6 +8,7 @@ from web3.exceptions import Web3Exception
 
 from models import ExecutionRequest, ExecutionResult, OrderSide, SharedMarketState, RuntimeConfig
 from modules.pancake_abi import PANCAKESWAP_PREDICTION_ABI
+from modules.dex_monitor import build_dex_reader
 
 PANCAKESWAP_CONTRACT = "0x18B2A687610328590Bc8F2e5fEdDe3b582A49cdA"
 
@@ -84,6 +85,7 @@ class Web3Executor:
         
         self.w3 = None
         self.contract = None
+        self._dex_router = None  # PancakeSwap V2 Router para precio DEX
         
         if self.dry_run:
             self.shared_state.log_messages.append("🔮 [MODO SIMULACRO] DRY_RUN=true. No se transmitirán transacciones reales.")
@@ -99,7 +101,14 @@ class Web3Executor:
             self.w3, self.contract = await loop.run_in_executor(None, _sync_setup_web3, self.rpc_url)
             
             self._running = True
-            
+
+            # ── Router V2 para precio DEX (usado por ArbitrageEngine) ────────
+            try:
+                _, self._dex_router = await loop.run_in_executor(None, build_dex_reader, self.rpc_url)
+                self.shared_state.log_messages.append("✅ [DEX] PancakeSwap V2 Router listo para lecturas de precio.")
+            except Exception as e:
+                self.shared_state.log_messages.append(f"⚠️ [DEX] Router V2 no disponible: {e}")
+
             # ── AUTO-HARVESTER al arranque ──────────────────────────────────
             await self.run_harvester()
             # ───────────────────────────────────────────────────────────────
