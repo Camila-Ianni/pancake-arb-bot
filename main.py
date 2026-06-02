@@ -265,7 +265,8 @@ class BotOrchestrator:
                             
                         continue
 
-                await asyncio.sleep(300)  # Strict 5 minutes
+                    # If no market found, retry sooner
+                    await asyncio.sleep(10)
 
             except asyncio.CancelledError:
                 break

@@ -80,7 +80,7 @@ def _extract_clob_market(market: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any
 
 class MarketScanner:
     def __init__(self, dashboard=None):
-        self.gamma_url = "https://gamma-api.polymarket.com/events?active=true&closed=false"
+        self.gamma_url = "https://gamma-api.polymarket.com/events?series_slug=btc-up-or-down-5m&active=true&closed=false"
         self.clob_url = "https://clob.polymarket.com/markets"
         self.dashboard = dashboard
 
@@ -142,19 +142,5 @@ class MarketScanner:
         if tid:
             return tid, name
             
-        # Fallback de testing
-        config = get_config()
-        if config.execution.dry_run:
-            simulated_market = {
-                "condition_id": "0xSIMULATED_CONDITION_ID",
-                "token_id_yes": "1111111111",
-                "token_id_no": "2222222222",
-                "close_ts": time.time() + 90.0,
-                "question": "⚠️ [SIMULACIÓN] BTC cerrará por encima de X?"
-            }
-            if self.dashboard:
-                self.dashboard.add_event("[SCANNER] ⚠️ Inyectando mercado de prueba (DRY_RUN)...")
-            return simulated_market, simulated_market["question"]
-            
-        logger.info("No se encontró ningún mercado activo de BTC a 5 minutos.")
+        logger.info("No se encontró ningún mercado activo de BTC a 5 minutos. Reintentando...")
         return None, ""

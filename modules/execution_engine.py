@@ -163,21 +163,19 @@ class ExecutionEngine:
                 elapsed_ms = (time.perf_counter() - t0) * 1000
                 logger.info(f"[FILL] ✓ SIMULACIÓN Exitosa | HTTP round-trip={elapsed_ms:.1f}ms")
                 
-                # INYECTAR MÉTRICAS FALSAS
-                if ctx.condition_id == "0xSIMULATED_CONDITION_ID":
-                    if hasattr(self, 'dashboard') and self.dashboard is not None:
-                        orch = getattr(self.dashboard, 'orchestrator', None)
-                        if orch:
-                            # 1. Sumar PnL ficticio al RiskManager
-                            if hasattr(orch, 'risk_manager') and orch.risk_manager is not None:
-                                from decimal import Decimal
-                                orch.risk_manager.record_trade_result(True, Decimal("5.50"))
-                                # FIX para Dashboard: el dashboard espera encontrar _total_pnl_usd directamente
-                                orch.risk_manager._total_pnl_usd = float(orch.risk_manager.metrics.total_pnl_usd)
-                            # 2. Incrementar contador de operaciones en ArbitrageEngine
-                            if hasattr(orch, 'arbitrage_engine') and orch.arbitrage_engine is not None:
-                                if hasattr(orch.arbitrage_engine, '_metrics'):
-                                    orch.arbitrage_engine._metrics.opportunities_executed += 1
+                # INYECTAR MÉTRICAS FALSAS (Aplica a cualquier DRY_RUN, ya sea mercado real o inventado)
+                if hasattr(self, 'dashboard') and self.dashboard is not None:
+                    orch = getattr(self.dashboard, 'orchestrator', None)
+                    if orch:
+                        # 1. Sumar PnL ficticio al RiskManager
+                        if hasattr(orch, 'risk_manager') and orch.risk_manager is not None:
+                            from decimal import Decimal
+                            orch.risk_manager.record_trade_result(True, Decimal("5.50"))
+                            orch.risk_manager._total_pnl_usd = float(orch.risk_manager.metrics.total_pnl_usd)
+                        # 2. Incrementar contador de operaciones en ArbitrageEngine
+                        if hasattr(orch, 'arbitrage_engine') and orch.arbitrage_engine is not None:
+                            if hasattr(orch.arbitrage_engine, '_metrics'):
+                                orch.arbitrage_engine._metrics.opportunities_executed += 1
                                     
             else:
                 resp = await asyncio.get_event_loop().run_in_executor(
