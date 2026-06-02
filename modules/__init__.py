@@ -1,8 +1,15 @@
-"""Módulos principales del sniper HFT."""
+"""
+modules/__init__.py - Paquete de módulos del bot de arbitraje.
 
-from .arbitrage_engine import ArbitrageEngine
-from .crypto_feed import CryptoFeed
-from .pancakeswap_monitor import PancakeSwapMonitor
-from .web3_executor import Web3Executor
+Este módulo exporta las clases principales para importación conveniente.
+"""
 
-__all__ = ["ArbitrageEngine", "CryptoFeed", "PancakeSwapMonitor", "Web3Executor"]
+from .arbitrage_engine import ArbitrageEngine, EngineState
+from .risk_manager import RiskManager, CircuitBreakerState
+
+__all__ = [
+    "ArbitrageEngine",
+    "EngineState",
+    "RiskManager",
+    "CircuitBreakerState",
+]

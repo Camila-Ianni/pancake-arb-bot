@@ -29,12 +29,12 @@ from datetime import datetime
 
 # Formato detallado para logs de archivo (incluye microsegundos)
 DETAILED_FORMAT = (
-    "%(asctime)s.%(msecs)03d | %(levelname)-8s | %(name)-20s | %(message)s"
+    "[%(asctime)s.%(msecs)03d] [%(levelname)s] [%(name)s] %(message)s"
 )
 
 # Formato simplificado para consola
 CONSOLE_FORMAT = (
-    "%(asctime)s.%(msecs)03d | %(levelname)-8s | %(message)s"
+    "[%(asctime)s.%(msecs)03d] [%(levelname)s] %(message)s"
 )
 
 # Formato JSON para ingestión en sistemas de monitoreo (ELK, Datadog)
@@ -202,12 +202,10 @@ def setup_logging(
     root_logger.handlers.clear()
 
     # =========================================================================
-    # CONSOLE HANDLER (siempre presente)
+    # CONSOLE HANDLER - SILENCIADO (Módulo de Dashboard controla la UI visual)
     # =========================================================================
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(getattr(logging, log_level.upper()))
-    console_handler.setFormatter(MicrosecondFormatter(CONSOLE_FORMAT))
-    root_logger.addHandler(console_handler)
+    # Se elimina el StreamHandler hacia sys.stdout para evitar scrolls infinitos.
+    # Toda la salida de consola será gestionada por el render loop.
 
     # =========================================================================
     # FILE HANDLER (opcional, para producción)

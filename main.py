@@ -1,221 +1,374 @@
-"""Orquestador principal del sniper multi-activo (BTC/ETH/SOL/BNB)."""
+"""
+main.py - Orquestador principal del bot de arbitraje de Polymarket.
 
-from __future__ import annotations
+Este módulo inicializa todos los componentes, gestiona el event loop de asyncio,
+y asegura un shutdown graceful cuando se recibe una señal de interrupción.
+
+ARQUITECTURA DE INICIALIZACIÓN:
+1. Cargar configuración desde .env
+2. Configurar logging profesional
+3. Inicializar componentes (Feed, Monitor, Engine, Executor, Risk)
+4. Conectar callbacks entre componentes
+5. Iniciar event loop
+6. Esperar señales de shutdown (SIGINT/SIGTERM)
+7. Cleanup graceful de todos los recursos
+
+HOT PATH CONSIDERATIONS:
+- Este archivo NO está en el hot path
+- Su única responsabilidad es orquestación lifecycle
+- Todo el procesamiento real está en los módulos especializados
+"""
 
 import asyncio
-import os
+import signal
 import sys
 import time
-import random
-import signal
-from decimal import Decimal, InvalidOperation
-from pathlib import Path
-import aiohttp
+from typing import Optional
+import logging
 
-# Agregamos el directorio actual al PYTHONPATH para evitar errores visuales (unresolved imports) en el IDE (Pylance/VSCode)
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from config import get_config, AppConfig
+from logging_config import setup_logging, get_logger, get_latency_logger
+from models import OrderBookSnapshot
 
-from dotenv import load_dotenv
-from models import ExecutionRequest, ExecutionResult, RuntimeConfig, SharedMarketState, SniperAsset, SniperState
-from modules.arbitrage_engine import ArbitrageEngine
-from modules.crypto_feed import CryptoFeed
-from modules.pancakeswap_monitor import PancakeSwapMonitor
-from modules.web3_executor import Web3Executor
+from modules.arbitrage_engine import ArbitrageEngine, EngineState
+from modules.risk_manager import RiskManager
+from modules.polymarket_chainlink_feed import ChainlinkRTDSFeed, MarketTimer
+from modules.execution_engine import ExecutionEngine, MarketContext
 
+# =============================================================================
+# CONFIGURACIÓN INICIAL
+# =============================================================================
 
-def clear_console() -> None:
-    if os.name == "nt":
-        os.system("cls")
-    else:
-        sys.stdout.write("\033[H\033[2J")
-        sys.stdout.flush()
+logger = get_logger(__name__)
+latency_logger = get_latency_logger(__name__)
 
 
-def ask_initial_capital() -> Decimal:
-    while True:
-        raw = input("🚀 [SESSION CONFIG] Ingrese capital inicial (USD): ").strip()
-        try:
-            value = Decimal(raw)
-        except InvalidOperation:
-            print("Entrada inválida.")
-            continue
-        if value <= 0:
-            print("Debe ser mayor a 0.")
-            continue
-        return value
+class BotOrchestrator:
+    """
+    Orquestador principal del bot.
+
+    RESPONSABILIDADES:
+    1. Inicializar todos los componentes
+    2. Gestionar el lifecycle (start/stop)
+    3. Manejar señales de interrupción (Ctrl+C, SIGTERM)
+    4. Logging periódico de estado y métricas
+    5. Health checking de componentes
+    """
+
+    def __init__(self, config: Optional[AppConfig] = None, order_size_usdc: float = 20.0):
+        """
+        Inicializa el orquestador.
+
+        Args:
+            config: Configuración (usa global si None)
+            order_size_usdc: Tamaño de cada orden (USDC)
+        """
+        self.config = config or get_config()
+        self.order_size_usdc = order_size_usdc
+
+        # Componentes (se inicializan en _initialize_components)
+        self.weather_feed = None
+        self.polymarket_monitor = None
+        self.risk_manager: Optional[RiskManager] = None
+        self.arbitrage_engine: Optional[ArbitrageEngine] = None
+        self.chainlink_feed: Optional[ChainlinkRTDSFeed] = None
+        self.execution_engine: Optional[ExecutionEngine] = None
+
+        # Estado del orquestador
+        self._running = False
+        self._shutdown_event = asyncio.Event()
+
+        # Tareas de background
+        self._health_check_task: Optional[asyncio.Task] = None
+        self._metrics_log_task: Optional[asyncio.Task] = None
+
+        # Señales de shutdown
+        self._shutdown_signals = [signal.SIGINT, signal.SIGTERM]
+
+        logger.info("BotOrchestrator inicializado")
+
+    async def _initialize_components(self) -> None:
+        """
+        Inicializa todos los componentes del sistema.
+
+        El orden es importante:
+        1. Risk Manager (no depende de nadie)
+        2. Web3 Executor (depende de config)
+        3. Arbitrage Engine (depende de Risk + Executor)
+        4. Weather Feed (independiente)
+        5. Polymarket Monitor (independiente)
+        """
+        logger.info("Inicializando componentes...")
+        
+        # 0. Dashboard Renderer primero para feedback inmediato
+        from modules.dashboard import DashboardRenderer
+        self.dashboard = DashboardRenderer(self)
+        self.dashboard.add_event("🟡 INICIALIZANDO Subsistemas...")
+        asyncio.create_task(self.dashboard.start())
+
+        with latency_logger.measure("component_initialization"):
+            # 1. Risk Manager
+            self.risk_manager = RiskManager(
+                config=self.config,
+                dry_run=self.config.execution.dry_run,
+            )
+            logger.debug("Risk Manager inicializado")
+
+            # 3. Arbitrage Engine (Maker Mode con CLOB API)
+            self.arbitrage_engine = ArbitrageEngine(
+                config=self.config,
+                risk_manager=self.risk_manager,
+            )
+            logger.debug("Arbitrage Engine inicializado (Maker Mode)")
+
+            # 4. Chainlink RTDS Feed
+            self.chainlink_feed = ChainlinkRTDSFeed()
+            logger.debug("Chainlink RTDS Feed inicializado")
+
+            # 5. Execution Engine (EIP-712 pre-signing)
+            self.execution_engine = ExecutionEngine(
+                clob_client=self.arbitrage_engine.clob_client.client,
+                config=self.config,
+                order_size_usdc=self.order_size_usdc
+            )
+            
+            # Conectar Feed con ExecutionEngine
+            async def _on_price_tick(price: float, delta: float, direction: str):
+                if self.execution_engine and hasattr(self.execution_engine, 'current_ctx') and self.execution_engine.current_ctx:
+                    ctx = self.execution_engine.current_ctx
+                    # Actualiza price in context
+                    await self.execution_engine.on_price_tick(ctx, price)
+                    
+                    if hasattr(self, 'dashboard'):
+                        sign = "+" if delta >= 0 else ""
+                        self.dashboard.add_event(f"⚡ [SIGNAL] BTC: ${price:,.2f} | Δ: {sign}{delta:.2f}% → {direction}")
+
+            self.chainlink_feed.on_signal = _on_price_tick
+            logger.debug("Execution Engine inicializado y conectado")
+
+            self.execution_engine.dashboard = self.dashboard
+            # 7. Market Scanner
+            from modules.market_scanner import MarketScanner
+            self.scanner = MarketScanner(dashboard=self.dashboard)
+
+            logger.info("Componentes inicializados")
 
 
-def render_panel(shared: SharedMarketState, crypto: CryptoFeed = None, engine: ArbitrageEngine = None, executor: Web3Executor = None) -> None:
-    clear_console()
-    sniper_label = "🟢 ARMADO" if shared.sniper_state != SniperState.STOPPED else "🔴 STOPPED"
-    p = shared.asset_prices
-    print("=" * 86)
-    print("🥞 PANCAKESWAP PREDICTION SNIPER (5m)")
-    print("=" * 86)
-    wallet_raw = os.getenv("WALLET_ADDRESS", "UNKNOWN")
-    wallet_suffix = wallet_raw[-4:] if len(wallet_raw) > 4 else "NONE"
-    
-    print(
-        f"Capital Inicial: ${shared.initial_capital_usd:.2f} | "
-        f"Ganancia Acumulada (PnL): ${shared.cumulative_pnl_usd:+.2f} | "
-        f"Estado del Sniper: {sniper_label}"
-    )
-    print(f"Wallet BNB: ...{wallet_suffix} | Status: {shared.latest_status[:70]}")
-    print("-" * 86)
-    print(
-        "Binance Mark | "
-        f"BTC: {p[SniperAsset.BTC]:.2f} | ETH: {p[SniperAsset.ETH]:.2f} | "
-        f"SOL: {p[SniperAsset.SOL]:.2f} | BNB: {p[SniperAsset.BNB]:.2f}"
-    )
-    print(
-        "Binance Threads | "
-        f"BTC: {'UP' if p[SniperAsset.BTC] > 0 else 'DOWN'} | "
-        f"ETH: {'UP' if p[SniperAsset.ETH] > 0 else 'DOWN'} | "
-        f"SOL: {'UP' if p[SniperAsset.SOL] > 0 else 'DOWN'} | "
-        f"BNB: {'UP' if p[SniperAsset.BNB] > 0 else 'DOWN'}"
-    )
-    print("-" * 86)
-    
-    ps = shared.pancake_state
-    print(f"🥞 Ronda (Epoch): {ps['epoch']} | Faltan: {ps['remaining_seconds']}s")
-    print(f"Bull Pool: {ps['bull_amount']:.2f} BNB ({ps['bull_multiplier']:.2f}x) | Bear Pool: {ps['bear_amount']:.2f} BNB ({ps['bear_multiplier']:.2f}x)")
-    print("-" * 86)
-    
-    if crypto and engine and executor:
-        print("⚡ TELEMETRÍA DE LATENCIA (HFT) ⚡")
-        print(f"├ Parseo WebSocket (Binance):   {crypto.metrics.avg_parse_ms:.5f} ms")
-        print(f"└ Ejecución Web3 (PancakeSwap): {executor.metrics.avg_sign_ms if hasattr(executor.metrics, 'avg_sign_ms') else 0.0:.5f} ms")
-        print("-" * 86)
-    print(
-        f"Inflight: {len(shared.inflight_assets)} | "
-        f"Kill Switch: {'ON' if shared.kill_switch else 'OFF'}"
-    )
-    print("=" * 86)
-    
-    # --- LOGS SECTION ---
-    print("📝 REGISTRO DE EVENTOS & ALERTAS SNIPER")
-    print("-" * 86)
-    for msg in list(shared.log_messages)[-8:]:
-        print(f" {msg}")
-    print("=" * 86)
 
+    async def _on_market_update(self, snapshot: OrderBookSnapshot) -> None:
+        """
+        Callback cuando hay actualización del order book.
 
-async def panel_loop(shared: SharedMarketState, crypto: CryptoFeed, engine: ArbitrageEngine, executor: Web3Executor) -> None:
-    while not shared.kill_switch:
-        render_panel(shared, crypto, engine, executor)
-        await asyncio.sleep(0.5)
+        Reenvía los datos al ArbitrageEngine para procesamiento.
+        """
+        if self.arbitrage_engine and getattr(self.arbitrage_engine, 'state', None) == getattr(EngineState, 'RUNNING', None):
+            await self.arbitrage_engine.submit_market_data(snapshot)
 
+    async def _on_arbitrage_signal(self, signal) -> None:
+        """
+        Callback cuando se detecta una oportunidad de arbitraje.
 
-async def result_loop(engine: ArbitrageEngine, result_queue: "asyncio.Queue[ExecutionResult]") -> None:
-    while True:
-        result = await result_queue.get()
-        engine.on_execution_result(result.asset, result.pnl_delta_usd)
+        Útil para logging externo, métricas, o integración con sistemas de monitoreo.
+        """
+        logger.info(
+            f"📊 Señal detectada: {signal.signal_type.name} | "
+            f"ROI={signal.expected_roi:.2%} | "
+            f"net_profit=${signal.net_expected_profit:.2f} | "
+            f"urgency={signal.urgency_score:.2f}"
+        )
 
+    async def _health_check_loop(self) -> None:
+        """
+        Loop de health checking de componentes.
 
-async def simulated_market_activity(result_queue: asyncio.Queue[ExecutionResult], shared: SharedMarketState) -> None:
-    """Función de simulación desactivada para evitar inyectar PnL falso."""
-    pass
+        Verifica que todos los componentes estén vivos y reporta estado.
+        """
+        while self._running:
+            try:
+                await asyncio.sleep(5)  # Chequear cada 5 segundos
 
+                # Verificar componentes
+                issues = []
 
-async def _check_polygon_rpc(session: aiohttp.ClientSession, rpc_url: str) -> bool:
-    payload = {"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []}
-    try:
-        async with session.post(rpc_url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            if resp.status != 200:
-                return False
-            data = await resp.json()
-            return str(data.get("result", "")).lower() in ("0x89", "137")
-    except Exception:
-        return False
+                if self.arbitrage_engine:
+                    engine_state = getattr(self.arbitrage_engine, 'state', None)
+                    if getattr(engine_state, 'name', '') == 'ERROR' or engine_state == getattr(EngineState, 'ERROR', None):
+                        issues.append("Arbitrage Engine: error")
+                    elif getattr(engine_state, 'name', '') == 'PAUSED' or engine_state == getattr(EngineState, 'PAUSED', None):
+                        issues.append("Arbitrage Engine: pausado (circuit breaker)")
 
+                if issues:
+                    logger.warning(f"⚠️ Health check issues: {', '.join(issues)}")
+                else:
+                    logger.debug("✓ Health check OK")
 
-async def _check_polymarket_api_key(session: aiohttp.ClientSession, api_key: str) -> bool:
-    headers = {"Authorization": f"Bearer {api_key}"}
-    try:
-        async with session.get(
-            "https://clob.polymarket.com/markets?limit=1",
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=10),
-        ) as resp:
-            return resp.status in (200, 401, 403)
-    except Exception:
-        return False
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error en health check: {e}", exc_info=True)
 
+    async def _trading_cycle_loop(self) -> None:
+        """
+        Ciclo principal de evaluación y simulación (Strict 5 minutes).
+        Extrae datos EXCLUSIVAMENTE del CLOB SDK oficial y muestra el Dashboard.
+        """
+        from datetime import datetime
 
-async def preflight_connectivity_checks() -> None:
-    rpc_url = os.getenv("BSC_RPC_URL", "https://bsc-dataseed.binance.org/").strip()
-    if not rpc_url:
-        raise RuntimeError("Falta BSC_RPC_URL para preflight.")
+        logger.info("Iniciando ciclo de evaluación de 5 minutos sobre mercados CLOB...")
 
+        while self._running:
+            try:
+                if self.arbitrage_engine and self.arbitrage_engine.clob_client:
+                    client = self.arbitrage_engine.clob_client
+                    
+                    ts = datetime.now().strftime('%H:%M:%S')
+                    
+                    if hasattr(self, 'dashboard'):
+                        self.dashboard.add_event(f"[{ts}] Esperando próximo mercado 5m...")
+                        
+                    token_id, market_name = await self.scanner.get_active_btc_5min_market()
+                    
+                    if token_id and isinstance(token_id, dict):
+                        is_sim = (token_id.get("condition_id") == "0xSIMULATED_CONDITION_ID")
+                        
+                        if hasattr(self, 'dashboard'):
+                            if is_sim:
+                                self.dashboard.add_event(f"[{ts}] [SIMULADOR] Reloj interno corriendo...")
+                            else:
+                                self.dashboard.add_event(f"[{ts}] Mercado enganchado: {market_name[:30]}...")
+                        
+                        # Iniciar timer para dashboard
+                        if self.chainlink_feed and not self.chainlink_feed.market_timer:
+                            # Start time could be calculated from open_ts, but we just use it for display
+                            self.chainlink_feed.set_market_timer(MarketTimer(start_time=time.time()))
+                            
+                        # Usar el precio de Binance como open_price
+                        initial_price = self.chainlink_feed.last_price if self.chainlink_feed else 67000.0
+                        
+                        ctx = MarketContext(
+                            condition_id=token_id["condition_id"],
+                            token_id_yes=token_id["token_id_yes"],
+                            token_id_no=token_id["token_id_no"],
+                            open_ts=time.time(), # Real open is earlier, but we start tracking now
+                            open_price=initial_price,
+                            last_price=initial_price
+                        )
+                        ctx.close_ts = token_id.get("close_ts", time.time() + 50.0)
+                        
+                        self.execution_engine.reset()
+                        self.execution_engine.current_ctx = ctx
+                        
+                        # El WS de Binance actualizará el feed y llamará a on_price_tick asíncronamente
+                        # Nosotros solo esperamos a que termine el mercado
+                        while time.time() < ctx.close_ts and self._running:
+                            await asyncio.sleep(1)
+                            
+                        continue
 
-async def run() -> None:
-    from dotenv import load_dotenv
-    load_dotenv(Path(__file__).parent / ".env")
-    clear_console()
-    await preflight_connectivity_checks()
-    
-    initial_capital = ask_initial_capital()
-    shared = SharedMarketState(initial_capital_usd=initial_capital, sniper_state=SniperState.ARMED)
-    
-    # Simulación de mercados activos si las IDs del env fallan, para forzar el estado ARMED
-    shared.latest_status = "SCANNING_SPREADS"
-    
-    runtime_cfg = RuntimeConfig()
-    env_threshold = os.getenv("PROFIT_SWEEP_THRESHOLD_USD", "").strip()
-    if env_threshold:
-        runtime_cfg.profit_sweep_threshold_usd = Decimal(env_threshold)
-    env_enabled = os.getenv("PROFIT_SWEEP_ENABLED", "true").strip().lower()
-    runtime_cfg.profit_sweep_enabled = env_enabled in ("1", "true", "yes", "on")
+                await asyncio.sleep(300)  # Strict 5 minutes
 
-    execution_queue: asyncio.Queue[ExecutionRequest] = asyncio.Queue(maxsize=2000)
-    result_queue: asyncio.Queue[ExecutionResult] = asyncio.Queue(maxsize=2000)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[SYSTEM ERROR] Fallo crítico en el loop de trading: {e}", exc_info=True)
+                await asyncio.sleep(30)
 
-    crypto = CryptoFeed(shared_state=shared)
-    monitor = PancakeSwapMonitor(shared_state=shared)
-    engine = ArbitrageEngine(shared_state=shared, execution_queue=execution_queue, runtime_cfg=runtime_cfg)
-    executor = Web3Executor(
-        execution_queue=execution_queue,
-        result_queue=result_queue,
-        shared_state=shared,
-        runtime_cfg=runtime_cfg,
-    )
+    def _setup_signal_handlers(self) -> None:
+        """
+        Configura handlers para señales de shutdown.
 
-    tasks = [
-        asyncio.create_task(crypto.start(), name="CryptoFeed"),
-        asyncio.create_task(monitor.start(), name="MarketMonitor"),
-        asyncio.create_task(engine.start(), name="ArbitrageEngine"),
-        asyncio.create_task(executor.start(), name="Web3Executor"),
-        asyncio.create_task(panel_loop(shared, crypto, engine, executor), name="Panel"),
-        asyncio.create_task(result_loop(engine, result_queue), name="ResultLoop"),
-        asyncio.create_task(simulated_market_activity(result_queue, shared), name="SimActivity"),
-    ]
+        Permite shutdown graceful con Ctrl+C o SIGTERM.
+        """
+        loop = asyncio.get_event_loop()
 
-    try:
-        while not shared.kill_switch:
-            await asyncio.sleep(0.1)
-    finally:
-        await crypto.stop()
-        await monitor.stop()
-        await engine.stop()
-        await executor.stop()
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        shared.sniper_state = SniperState.STOPPED
-        render_panel(shared, crypto, engine, executor)
+        for sig in self._shutdown_signals:
+            loop.add_signal_handler(sig, self._handle_shutdown_signal)
 
+        logger.debug(f"Signal handlers configurados para: {self._shutdown_signals}")
 
-def main() -> None:
-    try:
-        asyncio.run(run())
-    except KeyboardInterrupt:
-        clear_console()
-        print("\n🔌 [INFO] Cerrando sesión del Sniper de forma segura...\n")
-        try:
-            sys.exit(0)
-        except SystemExit:
-            os._exit(0)
+    def _handle_shutdown_signal(self) -> None:
+        """
+        Maneja una señal de shutdown.
+
+        Sets the shutdown event para iniciar cleanup graceful.
+        """
+        logger.info("Señal de shutdown recibida")
+        self._shutdown_event.set()
+
+    async def start(self) -> None:
+        """
+        Inicia todos los componentes del bot.
+
+        Se ejecuta hasta que se recibe una señal de shutdown.
+        """
+        logger.info("=" * 60)
+        logger.info("🚀 INICIANDO POLYMARKET ARBITRAGE BOT")
+        logger.info("=" * 60)
+
+        self._running = True
+
+        # 1. Inicializar componentes
+        await self._initialize_components()
+
+        # 2. Configurar handlers de señales
+        self._setup_signal_handlers()
+
+        # 3. Iniciar tareas de background
+        self._health_check_task = asyncio.create_task(self._health_check_loop())
+        if self.chainlink_feed:
+            asyncio.create_task(self.chainlink_feed.start())
+        
+        # 4. Iniciar ciclo principal de trading
+        trading_task = asyncio.create_task(self._trading_cycle_loop())
+
+        # 5. Esperar señal de shutdown
+        await self._shutdown_event.wait()
+
+        # 6. Shutdown graceful
+        logger.info("Iniciando proceso de shutdown...")
+        self._running = False
+        
+        trading_task.cancel()
+        if self._health_check_task:
+            self._health_check_task.cancel()
+        
+        if self.execution_engine:
+            await self.execution_engine.cleanup()
+            
+        logger.info("Bot detenido correctamente")
 
 
 if __name__ == "__main__":
-    main()
+    # Configurar logging inicial
+    setup_logging(log_level="INFO")
+    
+    capital_input = input("💰 Ingresa el tamaño de la apuesta por trade (USDC): ")
+    try:
+        order_size_usdc = float(capital_input)
+    except ValueError:
+        print("Valor inválido. Se usará el tamaño por defecto de 20.0 USDC.")
+        order_size_usdc = 20.0
+        
+    print("⏳ Autenticando SDK y cargando variables...")
+    
+    config = get_config()
+    orchestrator = BotOrchestrator(config=config, order_size_usdc=order_size_usdc)
+    
+    try:
+        asyncio.run(orchestrator.start())
+    except KeyboardInterrupt:
+        print("\n" + "="*50)
+        print("📊 RESUMEN FINAL DE LA SESIÓN")
+        print("="*50)
+        if hasattr(orchestrator, 'arbitrage_engine') and orchestrator.arbitrage_engine:
+            metrics = getattr(orchestrator.arbitrage_engine, '_metrics', None)
+            if metrics:
+                print(f"   Operaciones ejecutadas : {metrics.opportunities_executed}")
+        if hasattr(orchestrator, 'risk_manager') and orchestrator.risk_manager:
+            pnl = getattr(orchestrator.risk_manager, '_total_pnl_usd', 0.0)
+            print(f"   Wallet PnL Final       : ${pnl:.2f}")
+        print("="*50)
+        print("Bot detenido por el usuario.\n")
+    except Exception as e:
+        logger.critical(f"Error fatal: {e}", exc_info=True)
+        sys.exit(1)

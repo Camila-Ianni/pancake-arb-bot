@@ -28,7 +28,6 @@ class WalletConfig:
     rpc_url: str
     rpc_url_failover: Optional[str]
     wallet_address: str
-    safe_wallet_address: Optional[str]  # Para profit sweep
 
 
 @dataclass(frozen=True)
@@ -174,7 +173,7 @@ def load_config() -> AppConfig:
     # Cargar .env si existe
     env_path = Path(__file__).parent / ".env"
     if env_path.exists():
-        load_dotenv(env_path, override=False)
+        load_dotenv(env_path, override=True)
         logger.info(f"Cargando configuración desde {env_path}")
     else:
         logger.warning("No se encontró .env, usando variables de entorno del sistema")
@@ -185,15 +184,13 @@ def load_config() -> AppConfig:
     private_key = os.getenv("PRIVATE_KEY", "")
     _validate_required_env("PRIVATE_KEY", private_key if private_key else None)
 
-    rpc_url = os.getenv("RPC_URL", "")
-    _validate_required_env("RPC_URL", rpc_url if rpc_url else None)
+    rpc_url = os.getenv("RPC_URL", "https://bsc-dataseed.binance.org/")
 
     wallet_config = WalletConfig(
         private_key=private_key,
         rpc_url=rpc_url,
         rpc_url_failover=os.getenv("RPC_URL_FAILOVER"),
         wallet_address=os.getenv("WALLET_ADDRESS", ""),
-        safe_wallet_address=os.getenv("SAFE_WALLET_ADDRESS"),
     )
 
     # =========================================================================
@@ -201,11 +198,16 @@ def load_config() -> AppConfig:
     # =========================================================================
     api_key = os.getenv("POLYMARKET_API_KEY", "")
     condition_id = os.getenv("CONDITION_ID", "")
+    
+    market_ids = _parse_list_env("POLYMARKET_MARKET_IDS")
+    if not market_ids:
+        market_ids = _parse_list_env("MARKET_IDS")
+    logger.info(f"Cargados los siguientes Market IDs desde .env: {market_ids}")
 
     polymarket_config = PolymarketConfig(
         api_key=api_key,
         condition_id=condition_id,
-        market_ids=_parse_list_env("MARKET_IDS"),
+        market_ids=market_ids,
     )
 
     # =========================================================================

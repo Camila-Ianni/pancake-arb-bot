@@ -24,57 +24,11 @@ from typing import Optional, Dict, Any, List
 from enum import Enum, auto
 import logging
 
-logger = logging.getLogger(__name__)
+from config import AppConfig, get_config
+from logging_config import get_logger
+from models import CircuitBreakerState, RiskMetrics, ArbitrageSignal
 
-
-# ─── Tipos locales (antes importados de models con tipos inexistentes) ────
-
-class CircuitBreakerState(Enum):
-    CLOSED = auto()
-    OPEN = auto()
-    HALF_OPEN = auto()
-
-
-@dataclass
-class RiskMetrics:
-    """Métricas de riesgo en tiempo real."""
-    consecutive_losses: int = 0
-    consecutive_wins: int = 0
-    total_wins: int = 0
-    total_losses: int = 0
-    total_pnl_usd: Decimal = field(default_factory=lambda: Decimal("0"))
-    failed_transactions: int = 0
-    successful_transactions: int = 0
-    last_feed_latency_ms: float = 0.0
-    avg_feed_latency_ms: float = 0.0
-
-    @property
-    def win_rate(self) -> float:
-        total = self.total_wins + self.total_losses
-        return self.total_wins / total if total > 0 else 0.0
-
-    @property
-    def transaction_success_rate(self) -> float:
-        total = self.successful_transactions + self.failed_transactions
-        return self.successful_transactions / total if total > 0 else 0.0
-
-    def record_win(self, pnl: Decimal) -> None:
-        self.total_wins += 1
-        self.consecutive_wins += 1
-        self.consecutive_losses = 0
-        self.total_pnl_usd += pnl
-
-    def record_loss(self, pnl: Decimal) -> None:
-        self.total_losses += 1
-        self.consecutive_losses += 1
-        self.consecutive_wins = 0
-        self.total_pnl_usd -= pnl
-
-    def record_successful_transaction(self) -> None:
-        self.successful_transactions += 1
-
-    def record_failed_transaction(self) -> None:
-        self.failed_transactions += 1
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -106,20 +60,27 @@ class RiskManager:
 
     def __init__(
         self,
+        config: Optional[AppConfig] = None,
         dry_run: bool = True,
-        max_consecutive_losses: int = 3,
-        max_feed_latency_ms: int = 500,
-        max_failed_transactions: int = 5,
-        circuit_breaker_cooldown_sec: int = 300,
     ):
+        """
+        Inicializa el RiskManager.
+
+        Args:
+            config: Configuración de la aplicación
+            dry_run: Si True, no bloquea operaciones (solo loguea)
+        """
+        self.config = config or get_config()
         self.dry_run = dry_run
 
         # Límites de riesgo
         self.limits = RiskLimits(
-            max_consecutive_losses=max_consecutive_losses,
-            max_feed_latency_ms=max_feed_latency_ms,
-            max_failed_transactions=max_failed_transactions,
-            circuit_breaker_cooldown_sec=circuit_breaker_cooldown_sec,
+            max_consecutive_losses=self.config.risk.max_consecutive_losses,
+            max_feed_latency_ms=self.config.risk.max_feed_latency_ms,
+            max_failed_transactions=self.config.risk.max_failed_transactions,
+            max_daily_loss_usd=Decimal("500"),  # Configurable vía env
+            max_position_size_usd=self.config.trading.bet_size_usd * 10,
+            circuit_breaker_cooldown_sec=self.config.risk.circuit_breaker_cooldown_sec,
         )
 
         # Métricas en tiempo real
@@ -164,12 +125,19 @@ class RiskManager:
         return self._circuit_breaker_state != CircuitBreakerState.OPEN
 
     def _trigger_circuit_breaker(self, reason: str) -> None:
-        """Activa el circuit breaker."""
+        """
+        Activa el circuit breaker.
+
+        Args:
+            reason: Razón de la activación
+        """
         self._circuit_breaker_state = CircuitBreakerState.OPEN
         self._circuit_breaker_triggered_at = time.time_ns()
         self._circuit_breaker_reason = reason
 
-        logger.warning(f"⚠️ CIRCUIT BREAKER ACTIVADO: {reason}")
+        logger.warning(
+            f"⚠️ CIRCUIT BREAKER ACTIVADO: {reason}"
+        )
 
         # Agregar alerta
         alert = f"Circuit Breaker: {reason}"
@@ -178,14 +146,22 @@ class RiskManager:
             self._active_alerts.pop(0)
 
     def _try_reset_circuit_breaker(self) -> bool:
-        """Intenta resetear el circuit breaker."""
+        """
+        Intenta resetear el circuit breaker.
+
+        Returns:
+            True si se reseteó exitosamente
+        """
         if self._circuit_breaker_state != CircuitBreakerState.OPEN:
-            return True
+            return True  # Ya está cerrado
 
         # Verificar cooldown
         if self._circuit_breaker_triggered_at:
             elapsed_sec = (time.time_ns() - self._circuit_breaker_triggered_at) / 1_000_000_000
             if elapsed_sec < self.limits.circuit_breaker_cooldown_sec:
+                logger.debug(
+                    f"Circuit breaker en cooldown: {elapsed_sec:.0f}s / {self.limits.circuit_breaker_cooldown_sec}s"
+                )
                 return False
 
         # Verificar condiciones para resetear
@@ -203,66 +179,164 @@ class RiskManager:
         return False
 
     async def check_circuit_breaker(self) -> bool:
-        """Chequea y actualiza el estado del circuit breaker."""
+        """
+        Chequea y actualiza el estado del circuit breaker.
+
+        Debe llamarse periódicamente (ej. cada segundo).
+
+        Returns:
+            True si las operaciones están permitidas
+        """
         if self._circuit_breaker_state == CircuitBreakerState.OPEN:
             self._try_reset_circuit_breaker()
+
         return self.is_trading_allowed
 
     def record_feed_latency(self, latency_ms: float) -> None:
-        """Registra latencia del feed."""
+        """
+        Registra latencia del feed climático.
+
+        Args:
+            latency_ms: Latencia en milisegundos
+        """
         self.metrics.last_feed_latency_ms = latency_ms
+
+        # Moving average
         self.metrics.avg_feed_latency_ms = (
             self.metrics.avg_feed_latency_ms * 0.9 + latency_ms * 0.1
         )
 
+        # Check si excede límite
         if latency_ms > self.limits.max_feed_latency_ms:
             logger.warning(f"Latencia de feed excede límite: {latency_ms:.0f}ms > {self.limits.max_feed_latency_ms}ms")
+
             if self._circuit_breaker_state == CircuitBreakerState.CLOSED:
                 self._trigger_circuit_breaker(
                     f"Feed latency {latency_ms:.0f}ms > {self.limits.max_feed_latency_ms}ms"
                 )
 
-    def record_trade_result(self, is_win: bool, pnl_usd: Decimal) -> None:
-        """Registra el resultado de una operación."""
-        if is_win:
-            self.metrics.record_win(pnl_usd)
-            logger.info(f"✅ Trade ganador: +${pnl_usd:.2f}")
-        else:
-            self.metrics.record_loss(abs(pnl_usd))
-            logger.warning(f"❌ Trade perdedor: -${abs(pnl_usd):.2f}")
+    def record_trade_result(
+        self,
+        is_win: bool,
+        pnl_usd: Decimal,
+        signal: Optional[ArbitrageSignal] = None,
+    ) -> None:
+        """
+        Registra el resultado de una operación.
 
-        # Check circuit breaker por pérdidas
-        if self.metrics.consecutive_losses >= self.limits.max_consecutive_losses:
-            self._trigger_circuit_breaker(
-                f"{self.metrics.consecutive_losses} pérdidas consecutivas"
-            )
+        Args:
+            is_win: True si la operación fue ganadora
+            pnl_usd: P&L en USD (positivo = ganancia)
+            signal: Señal que originó la operación (para tracking)
+        """
+        async def _record():
+            async with self._state_lock:
+                if is_win:
+                    self.metrics.record_win(pnl_usd)
+                    logger.info(f"✅ Trade ganador: +${pnl_usd:.2f}")
+                else:
+                    self.metrics.record_loss(abs(pnl_usd))
+                    logger.warning(f"❌ Trade perdedor: -${abs(pnl_usd):.2f}")
 
-        # Agregar al historial
-        self._trade_history.append({
-            "timestamp_ns": time.time_ns(),
-            "is_win": is_win,
-            "pnl_usd": float(pnl_usd),
-        })
+                # Check circuit breaker por pérdidas
+                if self.metrics.consecutive_losses >= self.limits.max_consecutive_losses:
+                    self._trigger_circuit_breaker(
+                        f"{self.metrics.consecutive_losses} pérdidas consecutivas"
+                    )
 
-        # Limitar historial
-        if len(self._trade_history) > self._max_history:
-            self._trade_history.pop(0)
+                # Agregar al historial
+                self._trade_history.append({
+                    "timestamp_ns": time.time_ns(),
+                    "is_win": is_win,
+                    "pnl_usd": float(pnl_usd),
+                    "signal_id": signal.signal_id if signal else None,
+                })
+
+                # Limitar historial
+                if len(self._trade_history) > self._max_history:
+                    self._trade_history.pop(0)
+
+        # Ejecutar async
+        try:
+            loop = asyncio.get_event_loop()
+            loop.create_task(_record())
+        except RuntimeError:
+            # No hay loop running (ej. en tests)
+            pass
 
     def record_transaction_result(self, success: bool, error_message: Optional[str] = None) -> None:
-        """Registra el resultado de una transacción on-chain."""
+        """
+        Registra el resultado de una transacción on-chain.
+
+        Args:
+            success: True si la tx fue exitosa
+            error_message: Mensaje de error si falló
+        """
         if success:
             self.metrics.record_successful_transaction()
         else:
             self.metrics.record_failed_transaction()
             logger.warning(f"Transacción fallida: {error_message or 'Unknown error'}")
 
+            # Check circuit breaker
             if self.metrics.failed_transactions >= self.limits.max_failed_transactions:
                 self._trigger_circuit_breaker(
                     f"{self.metrics.failed_transactions} transacciones fallidas"
                 )
 
+    def validate_signal(self, signal: ArbitrageSignal) -> tuple[bool, Optional[str]]:
+        """
+        Valida si una señal de arbitraje es segura de ejecutar.
+
+        Args:
+            signal: Señal a validar
+
+        Returns:
+            (is_valid, reason) - True si es segura de ejecutar
+        """
+        # En dry run, siempre validar (pero loguear warnings)
+        if self.dry_run:
+            if not signal.is_profitable:
+                logger.debug(f"[DRY_RUN] Señal no rentable: ROI={signal.expected_roi:.2%}")
+            return True, None
+
+        # Check circuit breaker
+        if self._circuit_breaker_state == CircuitBreakerState.OPEN:
+            return False, f"Circuit breaker abierto: {self._circuit_breaker_reason}"
+
+        # Check rentabilidad
+        if not signal.is_profitable:
+            return False, "Señal no rentable después de costos"
+
+        # Check ROI mínimo
+        min_roi = self.config.trading.min_roi_threshold
+        if signal.expected_roi < min_roi:
+            return False, f"ROI {signal.expected_roi:.2%} < mínimo {min_roi:.2%}"
+
+        # Check slippage
+        max_slippage = self.config.trading.max_slippage_tolerance
+        if signal.estimated_slippage > max_slippage:
+            return False, f"Slippage {signal.estimated_slippage:.2%} > máximo {max_slippage:.2%}"
+
+        # Check gas price
+        # (asumir que signal incluye gas estimate)
+        # if signal.estimated_gas_cost > MAX_GAS_COST:
+        #     return False, "Gas cost demasiado alto"
+
+        # Check freshness de la señal
+        time_remaining_ms = signal.time_remaining_ns / 1_000_000
+        if time_remaining_ms < 50:  # Menos de 50ms
+            return False, "Señal muy antigua, posible stale"
+
+        return True, None
+
     def get_risk_summary(self) -> Dict[str, Any]:
-        """Obtiene un resumen del estado de riesgo actual."""
+        """
+        Obtiene un resumen del estado de riesgo actual.
+
+        Returns:
+            Dict con métricas clave de riesgo
+        """
         return {
             "circuit_breaker_state": self._circuit_breaker_state.name,
             "circuit_breaker_reason": self._circuit_breaker_reason,
@@ -274,7 +348,7 @@ class RiskManager:
             "transaction_success_rate": self.metrics.transaction_success_rate,
             "last_feed_latency_ms": self.metrics.last_feed_latency_ms,
             "avg_feed_latency_ms": self.metrics.avg_feed_latency_ms,
-            "active_alerts": self._active_alerts[-5:],
+            "active_alerts": self._active_alerts[-5:],  # Últimas 5 alertas
         }
 
     def reset_metrics(self) -> None:
@@ -285,4 +359,5 @@ class RiskManager:
         self._circuit_breaker_reason = None
         self._trade_history.clear()
         self._active_alerts.clear()
+
         logger.info("RiskManager metrics reseteadas")
