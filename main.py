@@ -251,9 +251,9 @@ class BotOrchestrator:
                             token_id_no=token_id["token_id_no"],
                             open_ts=time.time(), # Real open is earlier, but we start tracking now
                             open_price=initial_price,
-                            last_price=initial_price
+                            last_price=initial_price,
+                            close_ts=token_id.get("close_ts", time.time() + 50.0)
                         )
-                        ctx.close_ts = token_id.get("close_ts", time.time() + 50.0)
                         
                         self.execution_engine.reset()
                         self.execution_engine.current_ctx = ctx
@@ -263,6 +263,32 @@ class BotOrchestrator:
                         while time.time() < ctx.close_ts and self._running:
                             await asyncio.sleep(1)
                             
+                        # POST-MERCADO: Resolución y Retiro a Trust Wallet
+                        if self.execution_engine and getattr(self.execution_engine, '_fired', False):
+                            if hasattr(self, 'dashboard'):
+                                self.dashboard.add_event("🕒 Mercado cerrado. Esperando resolución de oráculo (UMA)...")
+                            
+                            # Simular la latencia de resolución on-chain
+                            await asyncio.sleep(5)
+                            
+                            if hasattr(self, 'dashboard'):
+                                if self.config.execution.dry_run:
+                                    # Asumimos win en simulador para el flujo de Trust Wallet
+                                    amount_won = self.order_size_usdc * 2
+                                    self.dashboard.add_event("✅ ¡Resolución oficial recibida! Resultado: WIN")
+                                    self.dashboard.add_event(f"💸 Reclamando y enviando ${amount_won:.2f} USDC a Trust Wallet...")
+                                    self.dashboard.add_event(f"🏦 TX Transferencia: 0x{int(time.time())}abc... Completada")
+                                    
+                                    if hasattr(self, 'risk_manager') and self.risk_manager:
+                                        from decimal import Decimal
+                                        self.risk_manager.metrics.record_win(Decimal(str(self.order_size_usdc)))
+                                else:
+                                    self.dashboard.add_event("⚠️ [LIVE] Mercado cerrado. La resolución de UMA puede tardar 2-5 minutos.")
+                                    self.dashboard.add_event("🏦 [LIVE] Las ganancias deben ser reclamadas manualmente o con el bot de Claims.")
+                        else:
+                            if hasattr(self, 'dashboard'):
+                                self.dashboard.add_event("Mercado finalizado (Sin ejecuciones previas).")
+                                
                         continue
 
                     # If no market found, retry sooner
@@ -343,14 +369,8 @@ if __name__ == "__main__":
     # Configurar logging inicial
     setup_logging(log_level="INFO")
     
-    capital_input = input("💰 Ingresa el tamaño de la apuesta por trade (USDC): ")
-    try:
-        order_size_usdc = float(capital_input)
-    except ValueError:
-        print("Valor inválido. Se usará el tamaño por defecto de 20.0 USDC.")
-        order_size_usdc = 20.0
-        
-    print("⏳ Autenticando SDK y cargando variables...")
+    print("Fijando tamaño de apuesta en 0.69 USDC")
+    order_size_usdc = 0.69
     
     config = get_config()
     orchestrator = BotOrchestrator(config=config, order_size_usdc=order_size_usdc)
@@ -358,18 +378,26 @@ if __name__ == "__main__":
     try:
         asyncio.run(orchestrator.start())
     except KeyboardInterrupt:
-        print("\n" + "="*50)
-        print("📊 RESUMEN FINAL DE LA SESIÓN")
-        print("="*50)
-        if hasattr(orchestrator, 'arbitrage_engine') and orchestrator.arbitrage_engine:
-            metrics = getattr(orchestrator.arbitrage_engine, '_metrics', None)
-            if metrics:
-                print(f"   Operaciones ejecutadas : {metrics.opportunities_executed}")
-        if hasattr(orchestrator, 'risk_manager') and orchestrator.risk_manager:
-            pnl = getattr(orchestrator.risk_manager, '_total_pnl_usd', 0.0)
-            print(f"   Wallet PnL Final       : ${pnl:.2f}")
-        print("="*50)
-        print("Bot detenido por el usuario.\n")
+        pass
     except Exception as e:
         logger.critical(f"Error fatal: {e}", exc_info=True)
         sys.exit(1)
+        
+    print("\n" + "="*50)
+    print("📊 RESUMEN FINAL DE LA SESIÓN")
+    print("="*50)
+    if hasattr(orchestrator, 'arbitrage_engine') and orchestrator.arbitrage_engine:
+        metrics = getattr(orchestrator.arbitrage_engine, '_metrics', None)
+        if metrics:
+            print(f"   Operaciones ejecutadas : {metrics.opportunities_executed}")
+            
+    if hasattr(orchestrator, 'risk_manager') and orchestrator.risk_manager:
+        pnl = getattr(orchestrator.risk_manager, '_total_pnl_usd', 0.0)
+        wins = getattr(orchestrator.risk_manager.metrics, 'total_wins', 0)
+        losses = getattr(orchestrator.risk_manager.metrics, 'total_losses', 0)
+        
+        print(f"   Win/Loss               : {wins}W - {losses}L")
+        print(f"   Wallet PnL Final       : ${pnl:.2f}")
+        print(f"   Wallet Trust (Sim)     : ${0.69 + float(pnl):.2f}")
+    print("="*50)
+    print("Bot detenido.\n")

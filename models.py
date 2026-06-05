@@ -300,6 +300,9 @@ class RiskMetrics:
 
     failed_transactions: int = 0
     successful_transactions: int = 0
+    
+    total_wins: int = 0
+    total_losses: int = 0
 
     # Latencia del feed
     last_feed_latency_ms: float = 0.0
@@ -317,8 +320,8 @@ class RiskMetrics:
     @property
     def win_rate(self) -> float:
         """Tasa de victorias (wins / total trades)."""
-        total = self.consecutive_losses + self.consecutive_wins
-        return self.consecutive_wins / total if total > 0 else 0.0
+        total = self.total_wins + self.total_losses
+        return self.total_wins / total if total > 0 else 0.0
 
     @property
     def transaction_success_rate(self) -> float:
@@ -330,6 +333,7 @@ class RiskMetrics:
         """Registra una operación ganadora."""
         self.consecutive_losses = 0
         self.consecutive_wins += 1
+        self.total_wins += 1
         self.total_pnl_usd += profit_usd
         self.total_profit_usd += profit_usd
 
@@ -337,6 +341,7 @@ class RiskMetrics:
         """Registra una operación perdedora."""
         self.consecutive_wins = 0
         self.consecutive_losses += 1
+        self.total_losses += 1
         self.total_pnl_usd -= loss_usd
         self.total_loss_usd += loss_usd
 

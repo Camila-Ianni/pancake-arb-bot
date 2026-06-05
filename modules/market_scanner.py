@@ -38,24 +38,45 @@ def _extract_market_fields(market: Dict[str, Any], title: str, event_end: str = 
             if isinstance(clob_ids, str):
                 clob_ids = json.loads(clob_ids)
             if isinstance(clob_ids, list) and len(clob_ids) >= 2:
-                # Calcular close_ts si hay event_end
-                close_ts = time.time() + 50.0  # Default 50s as user requested
-                if event_end:
+                # Extraer close_ts del título (ej: "Bitcoin Up or Down - June 4, 7:35PM-7:40PM ET")
+                close_ts = time.time() + 300.0  # Default 5m fallback
+                title_str = market.get('question', title)
+                import re
+                from datetime import datetime, timezone, timedelta
+                
+                # Buscar patrón de tiempo final (ej: "7:40PM ET" o "19:40 ET")
+                time_match = re.search(r'-(\d{1,2}:\d{2}(?:AM|PM)?)\s*ET', title_str, re.IGNORECASE)
+                if time_match:
                     try:
-                        # event_end format: '2024-06-02T03:35:00Z'
-                        dt = datetime.strptime(event_end.replace("Z", "+0000"), "%Y-%m-%dT%H:%M:%S%z")
-                        close_ts = dt.timestamp()
-                    except:
-                        pass
+                        time_str = time_match.group(1)
+                        # ET es UTC-4 en verano (EDT) o UTC-5 (EST)
+                        # Simplificamos usando UTC-4 fijo para este caso de uso inmediato
+                        et_tz = timezone(timedelta(hours=-4))
+                        now_et = datetime.now(et_tz)
+                        
+                        if 'AM' in time_str.upper() or 'PM' in time_str.upper():
+                            target_time = datetime.strptime(time_str, "%I:%M%p").time()
+                        else:
+                            target_time = datetime.strptime(time_str, "%H:%M").time()
+                            
+                        target_dt = now_et.replace(hour=target_time.hour, minute=target_time.minute, second=0, microsecond=0)
+                        
+                        # Si el tiempo ya pasó por poco, podría ser mañana (no habitual en 5m, pero por si acaso)
+                        if (now_et - target_dt).total_seconds() > 300:
+                            target_dt += timedelta(days=1)
+                            
+                        close_ts = target_dt.timestamp()
+                    except Exception as e:
+                        logger.warning(f"No se pudo parsear el tiempo del título '{title_str}': {e}")
                 
                 market_dict = {
                     "condition_id": condition_id,
                     "token_id_yes": clob_ids[0],
                     "token_id_no": clob_ids[1],
                     "close_ts": close_ts,
-                    "question": market.get('question', title)
+                    "question": title_str
                 }
-                return market_dict, market_dict["question"]
+                return market_dict, title_str
         except Exception as e:
             logger.warning(f"Error parseando clobTokenIds: {e}")
     return None, ""
@@ -87,13 +108,15 @@ class MarketScanner:
     async def _fetch_gamma(self) -> Tuple[Optional[str], str]:
         try:
             async with aiohttp.ClientSession(headers=BROWSER_HEADERS) as session:
-                async with session.get(self.gamma_url, timeout=5.0) as response:
+                url = f"{self.gamma_url}?active=true&closed=false&limit=100&order=startDate&ascending=false"
+                async with session.get(url, timeout=5.0) as response:
                     if response.status == 403:
                         logger.warning("Gamma API retornó 403 (WAF Cloudflare bloqueado).")
                         return None, ""
                     response.raise_for_status()
                     data = await response.json()
                     
+                    valid_markets = []
                     for event in data:
                         title = event.get('title', '')
                         slug = event.get('slug', '')
@@ -103,8 +126,16 @@ class MarketScanner:
                             for market in markets:
                                 market_dict, name = _extract_market_fields(market, title, event_end)
                                 if market_dict:
-                                    logger.info(f"Mercado encontrado vía Gamma: {name}")
-                                    return market_dict, name
+                                    time_remaining = market_dict["close_ts"] - time.time()
+                                    if 0 < time_remaining <= 360: # Cierra en los próximos 6 minutos max
+                                        valid_markets.append((time_remaining, market_dict, name))
+                                        
+                    if valid_markets:
+                        # Ordenar por el que cierra más pronto
+                        valid_markets.sort(key=lambda x: x[0])
+                        best_market = valid_markets[0]
+                        logger.info(f"Mercado encontrado vía Gamma: {best_market[2]} (cierra en {best_market[0]:.0f}s)")
+                        return best_market[1], best_market[2]
         except Exception as e:
             logger.warning(f"Error en _fetch_gamma: {e}")
         return None, ""
@@ -116,11 +147,19 @@ class MarketScanner:
                     response.raise_for_status()
                     data = await response.json()
                     markets = data.get('data', [])
+                    valid_markets = []
                     for market in markets:
                         market_dict, name = _extract_clob_market(market)
                         if market_dict:
-                            logger.info(f"Mercado encontrado vía CLOB Fallback: {name}")
-                            return market_dict, name
+                            time_remaining = market_dict["close_ts"] - time.time()
+                            if 0 < time_remaining <= 360:
+                                valid_markets.append((time_remaining, market_dict, name))
+                                
+                    if valid_markets:
+                        valid_markets.sort(key=lambda x: x[0])
+                        best_market = valid_markets[0]
+                        logger.info(f"Mercado encontrado vía CLOB Fallback: {best_market[2]} (cierra en {best_market[0]:.0f}s)")
+                        return best_market[1], best_market[2]
         except Exception as e:
             logger.warning(f"Error en _fetch_clob: {e}")
         return None, ""
