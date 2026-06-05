@@ -50,19 +50,38 @@ class ChainlinkRTDSFeed:
 
     async def _mock_feed_loop(self):
         """
-        Bucle simulado que intercepta eventos del oráculo cada cierto tiempo
-        para no bloquear ni abrumar la consola.
+        Conecta a Binance WebSocket para BTCUSDT en tiempo real.
         """
+        import websockets
+        import json
+        uri = "wss://stream.binance.com:9443/ws/btcusdt@ticker"
+        
+        reconnect_delay = 1.0
         while self._running:
-            await asyncio.sleep(2.0)
-            if self.market_timer:
-                import random
-                variation = random.uniform(-0.05, 0.05)
-                self.last_price *= (1 + (variation / 100))
-                direction = "UP" if variation >= 0 else "DOWN"
-                
-                if self.on_signal:
-                    if asyncio.iscoroutinefunction(self.on_signal):
-                        await self.on_signal(self.last_price, variation, direction)
-                    else:
-                        self.on_signal(self.last_price, variation, direction)
+            try:
+                async with websockets.connect(uri) as websocket:
+                    logger.info("✅ Conectado al Feed de Binance (BTCUSDT)")
+                    reconnect_delay = 1.0
+                    while self._running:
+                        message = await websocket.recv()
+                        data = json.loads(message)
+                        
+                        price = float(data['c'])
+                        # Usar el precio de hace 24h para el delta, o calcularlo desde el last_price
+                        delta = price - self.last_price
+                        delta_pct = (delta / self.last_price) * 100 if self.last_price else 0.0
+                        direction = "UP" if delta >= 0 else "DOWN"
+                        
+                        self.last_price = price
+                        
+                        if self.on_signal:
+                            if asyncio.iscoroutinefunction(self.on_signal):
+                                await self.on_signal(self.last_price, delta_pct, direction)
+                            else:
+                                self.on_signal(self.last_price, delta_pct, direction)
+                                
+            except Exception as e:
+                if self._running:
+                    logger.error(f"Error en Binance WS: {e}. Reconectando en {reconnect_delay}s...")
+                    await asyncio.sleep(reconnect_delay)
+                    reconnect_delay = min(reconnect_delay * 2, 60.0)
